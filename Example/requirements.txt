@@ -1,0 +1,7 @@
+numpy>=1.20
+pandas>=1.3
+
+# Optional (uncomment if you use them):
+# scipy>=1.7
+# scikit-learn>=1.0
+# torch>=2.0
