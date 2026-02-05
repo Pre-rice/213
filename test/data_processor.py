@@ -4,7 +4,7 @@ import numpy as np
 
 # 1. 加载数据
 print("1. 加载数据...")
-df = pd.read_csv("data/E.csv")
+df = pd.read_csv("train_data/E.csv")
 print(f"数据形状: {df.shape}")
 print(f"数据列: {list(df.columns)}")
 
