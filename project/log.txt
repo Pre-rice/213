@@ -1,0 +1,39 @@
+线性模型baseline v0 (r0)
+total_bid_vol trade_imbalance_vol_mean_5min 核心特征，简单线性组合
+第1天: IC=0.179862
+第2天: IC=0.169500
+第3天: IC=0.124910
+第4天: IC=0.138567
+第5天: IC=0.124201
+平均IC: 0.147408 (+/- 0.023083)
+ICIR: 6.3859
+
+LightGBM v1
+引入板块特征 TradeImbalance_diff+Sector_OrderImbalance 减小训练率，去噪，提高稳定性
+第1天: IC=0.246240
+第2天: IC=0.146677
+第3天: IC=0.091388
+第4天: IC=0.173885
+第5天: IC=0.176812
+平均IC: 0.167000 (+/- 0.050106)
+ICIR: 3.3330
+
+LightGBM v2
+引入资金流特征(与目标值高IC) AmountImbalance AmountImbalance_mean_600 并进行网格搜索调参优化
+第1天: IC=0.278808
+第2天: IC=0.205223
+第3天: IC=0.125601
+第4天: IC=0.212238
+第5天: IC=0.181186
+平均IC: 0.200611 (+/- 0.049548)
+ICIR: 4.0488
+
+LightGBM v3 (r1)
+引入板块短期脉冲特征 Sector_TradeImbalance_pulse
+第1天: IC=0.334108
+第2天: IC=0.272388
+第3天: IC=0.151432
+第4天: IC=0.296200
+第5天: IC=0.196337
+平均IC: 0.250093 (+/- 0.066791)
+ICIR: 3.7444
