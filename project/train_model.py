@@ -7,14 +7,23 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：四个多样化 Ridge 子模型 + 基于滚动 IC 的自适应权重
+# 动态集成架构：8 个多样化 Ridge 子模型 + 基于滚动 IC 的自适应权重
 #
-# 设计原则：每个子模型聚焦不同的市场驱动因子，在不同"市场机制日"各有优势：
+# 设计原则：每个子模型聚焦不同的市场驱动因子和时段特性，在不同"市场机制日"各有优势：
 #
-#   MA (balanced)   — 综合型：成交流 + 委托流，整体最强，大多数日子表现稳定
-#   MC (trend)      — 趋势型：纯 TI 长期信号，趋势延续日（如 Day 1 午后）最优
-#   MD (extended)   — 扩展综合型：MA + Sect_ONI_p30 + OVI_p30，特征最完整
-#   ME (pure OVI)   — 极简委托型：仅 OVI/ONI/TotalBidVol，与 MA/MD 互补
+#   MA   (balanced)      — 综合型：成交流 + 委托流，整体最强，大多数日子表现稳定
+#   MD   (extended)      — 扩展综合型：MA + Sect_ONI_p30 + OVI_p30，特征最完整
+#   MT   (MA + time13800)— MA 叠加日内时间偏移修正 (aft_13800)
+#   MTC  (MC + time13800)— 趋势型：纯 TI 信号 + aft_13800 时段调整
+#   MTD  (MD + time13800)— 扩展综合型 + aft_13800 时段调整
+#   MTE  (ME + time13800)— 极简委托型 (OVI/ONI/TotalBidVol) + aft_13800 调整
+#   MT12 (MA + time12000)— MA + 稍早时段分界 aft_12000，与 MT 互补
+#   MTD12(MD + time12000)— MD + aft_12000，覆盖更早的日内偏移
+#
+# 日内时间特征说明：
+#   aft_13800 = (tick_index > 13800): 约为交易日中间位置；IC 分析显示下午段
+#               Return5min 系统性偏低，加入此特征使模型自动修正跨时段偏差。
+#   aft_12000 = (tick_index > 12000): 稍早的分界点，与 aft_13800 形成互补。
 #
 # 动态集成逻辑（模拟在线预测中的自适应调权）：
 #   由于 Return5min(t) = (MidPrice(t+600) - MidPrice(t)) / MidPrice(t)，
@@ -24,45 +33,43 @@ warnings.filterwarnings('ignore')
 #   softmax(rolling_IC * TEMP) 作为当前 tick 的集成权重。
 # ════════════════════════════════════════════════════════════════════════════════
 
+_BASE14 = [
+    'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
+    'Sect_OBI1', 'E_TI_rel_600',
+    'TradeImb_p60', 'TradeImb_p40', 'Sect_TI_p40',
+    'OVI_p15', 'OVI_p60', 'Sect_OVI_p20',
+    'TradeImb_ep60', 'OVI_ep15', 'TNI_ep15',
+]
+_MC9 = [
+    'TradeImb_600', 'TradeImb_diff',
+    'TradeImb_p60', 'TradeImb_p40', 'TradeImb_ep60',
+    'E_TI_rel_600', 'Sect_TI_p40',
+    'TradeImb_p30', 'TradeImb_p15',
+]
+_ME8 = [
+    'TotalBidVol', 'OVI_p15', 'OVI_p60', 'OVI_ep15',
+    'ONI_p15', 'Sect_OBI1', 'Sect_OVI_p20', 'TNI_ep15',
+]
+_MD16 = _BASE14 + ['Sect_ONI_p30', 'OVI_p30']
+
 # 子模型定义：(feature_list, ridge_alpha)
 MODELS = {
-    'MA': (
-        ['TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
-         'Sect_OBI1', 'E_TI_rel_600',
-         'TradeImb_p60', 'TradeImb_p40', 'Sect_TI_p40',
-         'OVI_p15', 'OVI_p60', 'Sect_OVI_p20',
-         'TradeImb_ep60', 'OVI_ep15', 'TNI_ep15'],
-        150,
-    ),
-    'MC': (
-        ['TradeImb_600', 'TradeImb_diff',
-         'TradeImb_p60', 'TradeImb_p40', 'TradeImb_ep60',
-         'E_TI_rel_600', 'Sect_TI_p40',
-         'TradeImb_p30', 'TradeImb_p15'],
-        200,
-    ),
-    'MD': (
-        ['TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
-         'Sect_OBI1', 'E_TI_rel_600',
-         'TradeImb_p60', 'TradeImb_p40', 'Sect_TI_p40',
-         'OVI_p15', 'OVI_p60', 'Sect_OVI_p20',
-         'TradeImb_ep60', 'OVI_ep15', 'TNI_ep15',
-         'Sect_ONI_p30', 'OVI_p30'],
-        150,
-    ),
-    'ME': (
-        ['TotalBidVol', 'OVI_p15', 'OVI_p60', 'OVI_ep15',
-         'ONI_p15', 'Sect_OBI1', 'Sect_OVI_p20', 'TNI_ep15'],
-        80,
-    ),
+    'MA':    (_BASE14,                         150),
+    'MD':    (_MD16,                           150),
+    'MT':    (_BASE14 + ['aft_13800'],         150),
+    'MTC':   (_MC9   + ['aft_13800'],          200),
+    'MTD':   (_MD16  + ['aft_13800'],          150),
+    'MTE':   (_ME8   + ['aft_13800'],           80),
+    'MT12':  (_BASE14 + ['aft_12000'],         150),
+    'MTD12': (_MD16  + ['aft_12000'],          150),
 }
 
 MODEL_NAMES = list(MODELS.keys())
 
 # 动态集成超参数（通过5折交叉验证搜索确定）
-ENSEMBLE_WINDOW = 700   # 滚动 IC 窗口 (tick 数，约 5.8 分钟)
-ENSEMBLE_TEMP   = 5     # softmax 温度（越大越偏向最优模型）
-ENSEMBLE_FLOOR  = 0.05  # 每个模型的最小权重下限（防止极端权重）
+ENSEMBLE_WINDOW = 900   # 滚动 IC 窗口 (tick 数，约 7.5 分钟)
+ENSEMBLE_TEMP   = 8     # softmax 温度（越大越偏向最优模型）
+ENSEMBLE_FLOOR  = 0.0   # 权重下限（0 = 不限制，允许最优模型独占权重）
 RETURN_DELAY    = 600   # Return5min 可知延迟 = 5 分钟 / 0.5s = 600 ticks
 
 
@@ -147,7 +154,7 @@ def train():
     gkf = GroupKFold(n_splits=5)
     splits = list(gkf.split(np.zeros(len(df)), y, groups))
 
-    print("训练 4 个子模型，运行 5 折交叉验证...")
+    print(f"训练 {len(MODEL_NAMES)} 个子模型，运行 5 折交叉验证...")
     print(f"子模型: {[f'{n}({len(MODELS[n][0])}feat,α={MODELS[n][1]})' for n in MODEL_NAMES]}")
     print(f"集成参数: window={ENSEMBLE_WINDOW}, temp={ENSEMBLE_TEMP}, "
           f"floor={ENSEMBLE_FLOOR}, delay={RETURN_DELAY}")

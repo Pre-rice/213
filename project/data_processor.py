@@ -21,7 +21,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 20 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 22 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -54,6 +54,10 @@ def process_day_data(day_data):
      18.  Sect_TI_p40         - 板块成交量失衡 SMA40 脉冲
      19.  Sect_OVI_p20        - 板块委托量失衡 SMA20 脉冲
      20.  Sect_ONI_p30        - 板块委托笔数失衡 SMA30 脉冲
+
+    ── 日内时间特征 ─────────────────────────────────────────────────────────────
+     21.  aft_13800           - tick_index > 13800 二值 (交易日后半段指示)
+     22.  aft_12000           - tick_index > 12000 二值 (稍早分界，与 21 互补)
     """
     e = day_data['E']
 
@@ -134,6 +138,14 @@ def process_day_data(day_data):
     feats['Sect_OVI_p20'] = s_ovi_20 - s_ovi_600
     feats['Sect_ONI_p30'] = s_oni_30 - s_oni_600
 
+    # ── 日内时间特征 ─────────────────────────────────────────────────────────────
+    # 利用日内 tick 位置作为二值特征，捕捉上午/下午收益率系统性偏移：
+    #   aft_13800: tick_index > 13800 (交易日约后半段)
+    #   aft_12000: tick_index > 12000 (稍早的分界点，与 aft_13800 形成互补)
+    tick_idx = np.arange(len(e), dtype=float)
+    feats['aft_13800'] = (tick_idx > 13800).astype(float)
+    feats['aft_12000'] = (tick_idx > 12000).astype(float)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -141,6 +153,7 @@ def process_day_data(day_data):
         'OVI_p15', 'OVI_p30', 'OVI_p60', 'OVI_ep15',
         'ONI_p15', 'ONI_p30', 'TNI_ep15',
         'Sect_OBI1', 'E_TI_rel_600', 'Sect_TI_p40', 'Sect_OVI_p20', 'Sect_ONI_p30',
+        'aft_13800', 'aft_12000',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})
