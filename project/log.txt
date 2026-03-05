@@ -37,3 +37,17 @@ LightGBM v3 (r1)
 第5天: IC=0.196337
 平均IC: 0.250093 (+/- 0.066791)
 ICIR: 3.7444
+
+采用更严格的五折交叉验证方案
+
+特征列表: 'TotalBidVol', 'TradeImbalance_mean_600', 'TradeImbalance_diff','Sector_OrderImbalance','TradeImbalance_pulse','Sector_TradeImb_pulse'
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.150760
+Fold 2  | Day 4    | 0.123630
+Fold 3  | Day 3    | 0.143616
+Fold 4  | Day 2    | 0.280631
+Fold 5  | Day 1    | 0.188939
+------------------------------
+平均 IC: 0.177515
+ICIR: 3.1850

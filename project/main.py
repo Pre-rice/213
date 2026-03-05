@@ -12,6 +12,8 @@ def run_test():
 
     #########Online Predict
     for day in days:
+        model.reset()
+        
         day_data = load_day_data("./data", day)
         n_ticks = len(day_data['E'])
 
