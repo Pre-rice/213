@@ -21,7 +21,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 22 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 27 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -58,6 +58,13 @@ def process_day_data(day_data):
     ── 日内时间特征 ─────────────────────────────────────────────────────────────
      21.  aft_13800           - tick_index > 13800 二值 (交易日后半段指示)
      22.  aft_12000           - tick_index > 12000 二值 (稍早分界，与 21 互补)
+
+    ── 滞后已实现收益特征 ─────────────────────────────────────────────────────
+     23.  sect_ret_lag        - 板块(ABCD)过去5分钟平均已实现收益（动量/反转）
+     24.  e_ret_lag           - E 过去5分钟已实现收益（均值回复信号）
+     25.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
+     26.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
+     27.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
     """
     e = day_data['E']
 
@@ -142,9 +149,30 @@ def process_day_data(day_data):
     # 利用日内 tick 位置作为二值特征，捕捉上午/下午收益率系统性偏移：
     #   aft_13800: tick_index > 13800 (交易日约后半段)
     #   aft_12000: tick_index > 12000 (稍早的分界点，与 aft_13800 形成互补)
-    tick_idx = np.arange(len(e), dtype=float)
+    tick_idx = np.arange(len(e), dtype=int)
     feats['aft_13800'] = (tick_idx > 13800).astype(float)
     feats['aft_12000'] = (tick_idx > 12000).astype(float)
+
+    # ── 滞后已实现收益特征 ──────────────────────────────────────────────────────
+    # 核心思路：Return5min(t) 在 t+600 时可知，因此 Return5min(t-600) 在 t 时
+    # 已完全已知，无任何前视偏差。这些滞后收益携带市场动量/反转信息。
+    #
+    # sect_ret_lag: 板块(ABCD)过去5分钟平均已实现收益（各股取平均）
+    # e_ret_lag:    E股自身过去5分钟已实现收益（均值回复信号）
+    # past_ret_120/300/600: E股中间价在过去 1/2.5/5 分钟内的收益率
+    sect_ret_arr = np.zeros(len(e))
+    for s in ('A', 'B', 'C', 'D'):
+        sect_ret_arr += (pd.Series(day_data[s]['Return5min'].values)
+                         .shift(600).fillna(0.0).values / 4.0)
+    feats['sect_ret_lag'] = np.clip(sect_ret_arr, -0.1, 0.1)
+    feats['e_ret_lag'] = np.clip(
+        pd.Series(e['Return5min'].values).shift(600).fillna(0.0).values, -0.1, 0.1)
+
+    mid = (e['BidPrice1'].values + e['AskPrice1'].values) / 2.0
+    mid_s = pd.Series(mid)
+    for lag in (120, 300, 600):
+        ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).fillna(0.0).values
+        feats[f'past_ret_{lag}'] = np.clip(ret, -0.1, 0.1)
 
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
@@ -154,6 +182,8 @@ def process_day_data(day_data):
         'ONI_p15', 'ONI_p30', 'TNI_ep15',
         'Sect_OBI1', 'E_TI_rel_600', 'Sect_TI_p40', 'Sect_OVI_p20', 'Sect_ONI_p30',
         'aft_13800', 'aft_12000',
+        'sect_ret_lag', 'e_ret_lag',
+        'past_ret_120', 'past_ret_300', 'past_ret_600',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

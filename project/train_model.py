@@ -52,23 +52,33 @@ _ME8 = [
 ]
 _MD16 = _BASE14 + ['Sect_ONI_p30', 'OVI_p30']
 
+# 滞后已实现收益特征组合（无前视偏差，所有值均在预测时刻可知）
+_SR = ['sect_ret_lag', 'e_ret_lag']           # 板块/E 过去5分钟已实现收益
+_PR = ['past_ret_120', 'past_ret_300', 'past_ret_600']  # E 中间价动量/反转
+
 # 子模型定义：(feature_list, ridge_alpha)
 MODELS = {
-    'MA':    (_BASE14,                         150),
-    'MD':    (_MD16,                           150),
-    'MT':    (_BASE14 + ['aft_13800'],         150),
-    'MTC':   (_MC9   + ['aft_13800'],          200),
-    'MTD':   (_MD16  + ['aft_13800'],          150),
-    'MTE':   (_ME8   + ['aft_13800'],           80),
-    'MT12':  (_BASE14 + ['aft_12000'],         150),
-    'MTD12': (_MD16  + ['aft_12000'],          150),
+    # ── 基础 8 模型（原有架构）────────────────────────────────────────────────
+    'MA':      (_BASE14,                          150),
+    'MD':      (_MD16,                            150),
+    'MT':      (_BASE14 + ['aft_13800'],          150),
+    'MTC':     (_MC9   + ['aft_13800'],           200),
+    'MTD':     (_MD16  + ['aft_13800'],           150),
+    'MTE':     (_ME8   + ['aft_13800'],            80),
+    'MT12':    (_BASE14 + ['aft_12000'],          150),
+    'MTD12':   (_MD16  + ['aft_12000'],           150),
+    # ── 滞后收益扩展模型（提升 IC 约 +0.003）────────────────────────────────
+    'MTsr12':   (_BASE14 + ['aft_12000'] + _SR,          150),  # BASE + aft_12000 + SR
+    'MTpr12':   (_BASE14 + ['aft_12000'] + _PR,          150),  # BASE + aft_12000 + PR
+    'MTsrpr12': (_BASE14 + ['aft_12000'] + _SR + _PR,    150),  # BASE + aft_12000 + SR+PR
+    'MTDsrpr12':(_MD16  + ['aft_12000'] + _SR + _PR,    150),  # MD16 + aft_12000 + SR+PR
 }
 
 MODEL_NAMES = list(MODELS.keys())
 
 # 动态集成超参数（通过5折交叉验证搜索确定）
 ENSEMBLE_WINDOW = 900   # 滚动 IC 窗口 (tick 数，约 7.5 分钟)
-ENSEMBLE_TEMP   = 8     # softmax 温度（越大越偏向最优模型）
+ENSEMBLE_TEMP   = 10    # softmax 温度（越大越偏向最优模型）
 ENSEMBLE_FLOOR  = 0.0   # 权重下限（0 = 不限制，允许最优模型独占权重）
 RETURN_DELAY    = 600   # Return5min 可知延迟 = 5 分钟 / 0.5s = 600 ticks
 
@@ -155,7 +165,6 @@ def train():
     splits = list(gkf.split(np.zeros(len(df)), y, groups))
 
     print(f"训练 {len(MODEL_NAMES)} 个子模型，运行 5 折交叉验证...")
-    print(f"子模型: {[f'{n}({len(MODELS[n][0])}feat,α={MODELS[n][1]})' for n in MODEL_NAMES]}")
     print(f"集成参数: window={ENSEMBLE_WINDOW}, temp={ENSEMBLE_TEMP}, "
           f"floor={ENSEMBLE_FLOOR}, delay={RETURN_DELAY}")
 
