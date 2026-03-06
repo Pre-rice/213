@@ -7,18 +7,21 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：20 个 Ridge 子模型（12 稳定 + 8 niche）+ 基于滚动 IC 的自适应权重
+# 动态集成架构：27 个 Ridge 子模型（12 稳定 + 15 niche）+ 基于滚动 IC 的自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（8 个）：整体不稳定但某些时段/机制下表现突出
+# Niche 模型（15 个）：整体不稳定但某些时段/机制下表现突出
 #   预热期权重为 0（NICHE_INIT_WEIGHT=0.0），由滚动 IC 机制发现其优势窗口
 #   Nep5/Nep12   — 超短期 OVI EMA5 脉冲（瞬时订单动能）
 #   NSov12/NSovT — 板块 OVI 超短期 EMA（板块流动性领先信号）
 #   Nag12/NagX   — 激进综合型（低正则化，高风险高收益）
 #   Npr30/NprD30 — 扩展短期价格动量（含 30/60 tick 极短收益率）
+#   Nsmr12/NsmrD12/NsmrX — 板块短期价格收益率 + 横截面相对表现
+#   Nlot12/NlotD12 — 大单成交失衡（lot_imb_15：单笔成交金额方向）
+#   NpOVI/NpOVI_S — OVI纯净+CSM+大单（剔除弱信号日噪声 TI 特征）
 #
 # 动态集成逻辑：
 #   Return5min(t) 在 t+600 可知，因此在 tick t 可用 [t-DELAY-WINDOW, t-DELAY]
@@ -54,6 +57,15 @@ _PR2 = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_
 # 超短期 OVI EMA 脉冲（高方差，对部分日期非常强，适合 niche 模型）
 _OVI5 = ['OVI_ep5', 'Sect_OVI_ep5']
 
+# 新增：板块短期价格收益率 & 横截面相对收益
+_SMR = ['sect_mid_ret_30', 'sect_mid_ret_120', 'csm_ret_120']
+
+# 新增：E 股买卖价差脉冲
+_SP = ['e_spread_pulse']
+
+# 新增：大单成交失衡（方向一致信号，弱信号日尤强）
+_LOT = ['lot_imb_15', 'sect_lot_imb_15']
+
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
 MODELS = {
@@ -70,7 +82,7 @@ MODELS = {
     'MTpr12':  (_BASE14 + ['aft_12000'] + _PR,   150, False),
     'MTsrpr12':(_BASE14 + ['aft_12000'] + _SR + _PR,  150, False),
     'MTDsrpr12':(_MD16 + ['aft_12000'] + _SR + _PR,   150, False),
-    # ── Niche 模型 (8 个)：初始权重 0，利用滚动 IC 发现其优势窗口 ────────────
+    # ── Niche 模型 (15 个)：初始权重 0，利用滚动 IC 发现其优势窗口 ────────────
     # 超短期 OVI EMA5 脉冲（某些市场机制下非常强）
     'Nep5':   (_ME8  + ['aft_13800'] + _OVI5,        80, True),
     'Nep12':  (_ME8  + ['aft_12000'] + _OVI5,        80, True),
@@ -83,6 +95,23 @@ MODELS = {
     # 扩展价格收益窗口（含 30/60 tick 短期动量）
     'Npr30':  (_BASE14 + ['aft_12000'] + _SR + _PR2,           150, True),
     'NprD30': (_MD16  + ['aft_12000'] + _SR + _PR2,            150, True),
+    # ── 板块短期价格动能 & 横截面相对表现 Niche 模型 (3 个) ─────────────────────
+    # 新增特征：sect_mid_ret_30/120（板块短期涨跌），csm_ret_120（E 落后板块的追涨/反转）
+    # 这些特征独立于订单流失衡，来自板块价格变动，是真正正交的新信息源。
+    'Nsmr12':   (_BASE14 + ['aft_12000'] + _SR + _SMR,         120, True),
+    'NsmrD12':  (_MD16  + ['aft_12000'] + _SR + _PR  + _SMR,   100, True),
+    'NsmrX':    (_MD16  + ['aft_12000'] + _SR + _PR2 + _OVI5 + _SMR,  20, True),
+    # ── 大单成交失衡 Niche 模型 (2 个) ─────────────────────────────────────────
+    # lot_imb_15: 全日 IC 符号一致为正（弱信号日 Day1/5 尤强），
+    # 与 OVI/TI 正交（测量单笔成交金额大小而非数量）。
+    'Nlot12':   (_BASE14 + ['aft_12000'] + _SR + _LOT,          120, True),
+    'NlotD12':  (_MD16  + ['aft_12000'] + _SR + _PR + _LOT,     100, True),
+    # ── OVI-纯净 + 横截面 + 大单 Niche 模型 (2 个) ──────────────────────────────
+    # 核心发现：弱信号日（Day1/5）TI 特征 IC 近零（MTC Day1 IC=0.124 vs MTE 0.218），
+    # 而 OVI + csm_ret_120（+0.088）+ lot_imb_15（+0.074）三者信号方向一致。
+    # NpOVI 系列模型完全剔除 TI 特征，专注于这三类互补信号。
+    'NpOVI':    (_ME8 + _OVI5 + ['aft_12000'] + _SR + _PR2 + ['csm_ret_120'] + _LOT, 20, True),
+    'NpOVI_S':  (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['csm_ret_120'] + _LOT,       100, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())

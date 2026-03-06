@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 32 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 38 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -74,6 +74,15 @@ def process_day_data(day_data):
      30.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
      31.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
      32.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
+
+    ── 板块短期价格收益率 & 横截面相对收益（新增）────────────────────────────
+     33.  sect_mid_ret_30     - 板块(ABCD)平均中间价过去 15 秒收益率 (订单流外的价格信息)
+     34.  sect_mid_ret_120    - 板块(ABCD)平均中间价过去 1 分钟收益率
+     35.  csm_ret_120         - sect_mid_ret_120 - past_ret_120（E 相对板块 1 分钟落后量）
+     36.  e_spread_pulse      - E 相对买卖价差偏离 600-tick 均值（做市商不确定性信号）
+     37.  lot_imb_15          - 15-tick 平均买入笔金额 vs 卖出笔金额相对偏差（大单方向）
+                                在全部 5 日 IC 符号一致为正，弱信号日（1,5）尤为突出
+     38.  sect_lot_imb_15     - 板块(ABCD)平均大单成交失衡（机构活跃度方向，全日一致正向）
     """
     e = day_data['E']
 
@@ -132,16 +141,19 @@ def process_day_data(day_data):
     sect_ti   = np.zeros(len(e))
     sect_ovi  = np.zeros(len(e))
     sect_oni  = np.zeros(len(e))
+    sect_mid  = np.zeros(len(e))   # 板块平均中间价（用于短期价格收益率特征）
     for s in ('A', 'B', 'C', 'D'):
         ds = day_data[s]
         sect_obi1 += _imb(ds['BidVolume1'],    ds['AskVolume1']).values
         sect_ti   += _imb(ds['TradeBuyVolume'], ds['TradeSellVolume']).values
         sect_ovi  += _imb(ds['OrderBuyVolume'], ds['OrderSellVolume']).values
         sect_oni  += _imb(ds['OrderBuyNum'],    ds['OrderSellNum']).values
+        sect_mid  += (ds['BidPrice1'].values + ds['AskPrice1'].values) / 2.0
     sect_obi1 /= 4.0
     sect_ti   /= 4.0
     sect_ovi  /= 4.0
     sect_oni  /= 4.0
+    sect_mid  /= 4.0
 
     s_ti_600  = _sma(sect_ti,  600).values
     s_ti_40   = _sma(sect_ti,   40).values
@@ -192,6 +204,70 @@ def process_day_data(day_data):
         ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).fillna(0.0).values
         feats[f'past_ret_{lag}'] = np.clip(ret, -clip, clip)
 
+    # ── 板块短期价格收益率 & 跨截面相对收益（新增）─────────────────────────────
+    # 现有板块特征（Sect_TI_p40, Sect_OVI_p20 等）均基于订单流失衡，
+    # 而板块价格近期涨跌（30/120 tick 收益率）提供了完全独立的信息维度：
+    #   sect_mid_ret_30  — 板块平均中间价过去 15 秒涨跌（极短期板块价格动能）
+    #   sect_mid_ret_120 — 板块平均中间价过去 1 分钟涨跌（短期板块价格动能）
+    #   csm_ret_120      — sect_mid_ret_120 - past_ret_120_E：
+    #                      "板块领先 E" 的横截面相对表现（均值回复/追涨）
+    # 三个特征均使用当前及历史价格计算，无任何前视偏差。
+    sect_mid_s = pd.Series(sect_mid)
+    for lag, clip in ((30, _RET_CLIP_SHORT), (120, _RET_CLIP_LONG)):
+        s_ret = (sect_mid_s - sect_mid_s.shift(lag)).divide(
+            sect_mid_s.shift(lag) + 1e-9).fillna(0.0).values
+        feats[f'sect_mid_ret_{lag}'] = np.clip(s_ret, -clip, clip)
+
+    # csm_ret_120: 板块 1 分钟收益 – E 自身 1 分钟收益
+    # 若 > 0：板块领先 E，E 可能追涨（动能跟随）或均值回复（反转）
+    feats['csm_ret_120'] = np.clip(
+        feats['sect_mid_ret_120'] - feats['past_ret_120'],
+        -_RET_CLIP_LONG * 2, _RET_CLIP_LONG * 2)
+
+    # ── E 股买卖价差脉冲（新增）─────────────────────────────────────────────────
+    # e_spread_pulse: 当前相对价差偏离其 600-tick 均值
+    # 价差扩大 → 做市商风险厌恶上升 → 往往先于价格较大波动
+    e_spread = (e['AskPrice1'].values - e['BidPrice1'].values) / (mid + 1e-9)
+    e_spread_sma600 = _sma(e_spread, 600).values
+    feats['e_spread_pulse'] = e_spread - e_spread_sma600
+
+    # ── 大单成交失衡（新增）────────────────────────────────────────────────────
+    # lot_imb_15: 近 15 tick 平均买入笔金额 vs 平均卖出笔金额的相对偏差
+    # 核心逻辑：大单（机构）买入时 avg_buy_size 高于历史均值，
+    #           这与 OVI/TI（仅统计数量/总量）正交，捕捉资金大小的方向信息。
+    # 实证：在本数据集 5 日中 IC 符号一致为正（0.02~0.07），尤其在弱信号日更强。
+    buy_num_e  = np.maximum(e['TradeBuyNum'].values.astype(float),  1.0)
+    sell_num_e = np.maximum(e['TradeSellNum'].values.astype(float), 1.0)
+    avg_buy_size  = e['TradeBuyAmount'].values.astype(float)  / buy_num_e
+    avg_sell_size = e['TradeSellAmount'].values.astype(float) / sell_num_e
+
+    b_sma15  = _sma(avg_buy_size,  15).values
+    b_sma600 = _sma(avg_buy_size, 600).values
+    s_sma15  = _sma(avg_sell_size,  15).values
+    s_sma600 = _sma(avg_sell_size, 600).values
+
+    # 各自归一化后做差：(avg_buy_15/avg_buy_600 - 1) - (avg_sell_15/avg_sell_600 - 1)
+    feats['lot_imb_15'] = np.clip(
+        b_sma15 / (b_sma600 + 1e-9) - s_sma15 / (s_sma600 + 1e-9),
+        -1.0, 1.0)
+
+    # sect_lot_imb_15: 板块(ABCD)平均大单成交失衡
+    # 全日 IC 方向一致为正（0.02~0.08），与 E 自身 lot_imb 互补但更稳定
+    sect_lot_imb = np.zeros(len(e))
+    for s in ('A', 'B', 'C', 'D'):
+        ds = day_data[s]
+        s_buy_n  = np.maximum(ds['TradeBuyNum'].values.astype(float),  1.0)
+        s_sell_n = np.maximum(ds['TradeSellNum'].values.astype(float), 1.0)
+        s_avg_b  = ds['TradeBuyAmount'].values.astype(float)  / s_buy_n
+        s_avg_s  = ds['TradeSellAmount'].values.astype(float) / s_sell_n
+        s_b15    = _sma(s_avg_b, 15).values
+        s_b600   = _sma(s_avg_b, 600).values
+        s_s15    = _sma(s_avg_s, 15).values
+        s_s600   = _sma(s_avg_s, 600).values
+        sect_lot_imb += np.clip(s_b15 / (s_b600 + 1e-9) - s_s15 / (s_s600 + 1e-9), -1.0, 1.0)
+    sect_lot_imb /= 4.0
+    feats['sect_lot_imb_15'] = sect_lot_imb
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -203,6 +279,9 @@ def process_day_data(day_data):
         'aft_13800', 'aft_12000',
         'sect_ret_lag', 'e_ret_lag',
         'past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600',
+        # 新增：板块短期价格收益率 + 横截面相对收益 + E 价差脉冲 + 大单成交失衡
+        'sect_mid_ret_30', 'sect_mid_ret_120', 'csm_ret_120', 'e_spread_pulse',
+        'lot_imb_15', 'sect_lot_imb_15',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})
