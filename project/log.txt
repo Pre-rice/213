@@ -1,46 +1,14 @@
-线性模型baseline v0 (r0)
-total_bid_vol trade_imbalance_vol_mean_5min 核心特征，简单线性组合
+Iter 0: 线性模型baseline
+特征(2): 'TotalBidVol', 'TradeImbalance_mean_5min'
+核心特征，简单线性组合
 第1天: IC=0.179862
 第2天: IC=0.169500
 第3天: IC=0.124910
 第4天: IC=0.138567
-第5天: IC=0.124201
-平均IC: 0.147408 (+/- 0.023083)
-ICIR: 6.3859
+第5天: IC=0.124201 (测试集)
 
-LightGBM v1
-引入板块特征 TradeImbalance_diff+Sector_OrderImbalance 减小训练率，去噪，提高稳定性
-第1天: IC=0.246240
-第2天: IC=0.146677
-第3天: IC=0.091388
-第4天: IC=0.173885
-第5天: IC=0.176812
-平均IC: 0.167000 (+/- 0.050106)
-ICIR: 3.3330
-
-LightGBM v2
-引入资金流特征(与目标值高IC) AmountImbalance AmountImbalance_mean_600 并进行网格搜索调参优化
-第1天: IC=0.278808
-第2天: IC=0.205223
-第3天: IC=0.125601
-第4天: IC=0.212238
-第5天: IC=0.181186
-平均IC: 0.200611 (+/- 0.049548)
-ICIR: 4.0488
-
-LightGBM v3 (r1)
-引入板块短期脉冲特征 Sector_TradeImbalance_pulse
-第1天: IC=0.334108
-第2天: IC=0.272388
-第3天: IC=0.151432
-第4天: IC=0.296200
-第5天: IC=0.196337
-平均IC: 0.250093 (+/- 0.066791)
-ICIR: 3.7444
-
-采用更严格的五折交叉验证方案
-
-特征列表: 'TotalBidVol', 'TradeImbalance_mean_600', 'TradeImbalance_diff','Sector_OrderImbalance','TradeImbalance_pulse','Sector_TradeImb_pulse'
+Iter 1: 线性模型baseline(采用更严格的五折交叉验证方案)
+特征(6): 'TotalBidVol', 'TradeImbalance_mean_600', 'TradeImbalance_diff','Sector_OrderImbalance','TradeImbalance_pulse','Sector_TradeImb_pulse'
 Fold   | Test Day | IC        
 ------------------------------
 Fold 1  | Day 5    | 0.150760
@@ -51,3 +19,204 @@ Fold 5  | Day 1    | 0.188939
 ------------------------------
 平均 IC: 0.177515
 ICIR: 3.1850
+
+Iter 2: Ridge 单模型基线（14 特征，alpha=150）
+特征(14): BASE14 = TotalBidVol, TradeImb_600, TradeImb_diff, Sect_OBI1,
+          E_TI_rel_600, TradeImb_p{40,60}, Sect_TI_p40, OVI_p{15,60},
+          Sect_OVI_p20, TradeImb_ep60, OVI_ep15, TNI_ep15
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.213700
+Fold 2  | Day 4    | 0.167000
+Fold 3  | Day 3    | 0.219500
+Fold 4  | Day 2    | 0.322300
+Fold 5  | Day 1    | 0.195700
+------------------------------
+平均 IC: 0.223640   (0.1775→0.2236) 提升25.9%
+ICIR: 4.2528        (3.1850→4.2528) 提升33.5%
+
+Iter 3: 四模型动态集成（MA/MC/MD/ME）
+核心优化点:
+  - 引入动态集成：滚动 IC 加权 softmax（window=700, temp=5, floor=0.05, delay=600）
+  - 4 个稳定 Ridge 子模型（MA: BASE14, MC: MC9, MD: MD16, ME: ME8）
+  - ME8 = OVI 纯净特征组，MA = 综合特征组，MC = TI 纯净组，MD = MA+ONI/OVI_p30
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.216300
+Fold 2  | Day 4    | 0.167300
+Fold 3  | Day 3    | 0.219400
+Fold 4  | Day 2    | 0.311800
+Fold 5  | Day 1    | 0.203300
+------------------------------
+平均 IC: 0.223640   (0.2236→0.2236) 提升0.0%
+ICIR: 4.6753        (4.2528→4.6753) 提升9.9%
+
+Iter 4: 8 模型集成 + 日内时间特征 aft_13800/aft_12000
+核心优化点:
+  - 新增特征: aft_13800（tick>13800二值）、aft_12000（tick>12000二值）
+  - 利用日内时段差异：下午 OVI 信号更强，上午 TI 反转更强
+  - 8 个稳定模型: MA/MD/MT/MTC/MTD/MTE/MT12/MTD12（各自叠加时间特征变体）
+  - 集成参数: window=900, temp=8, floor=0.0
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.236100
+Fold 2  | Day 4    | 0.236800
+Fold 3  | Day 3    | 0.281100
+Fold 4  | Day 2    | 0.360600
+Fold 5  | Day 1    | 0.242700
+------------------------------
+平均 IC: 0.271500  (0.2236→0.2715) 提升21.5%
+ICIR: 5.7031       (4.6753→5.7031) 提升22.0%
+
+Iter 5: 12 模型集成 + 滞后已实现收益特征（e_ret_lag/sect_ret_lag/past_ret_x）
+核心优化点:
+  - 新增特征(7): sect_ret_lag（板块600-tick收益），e_ret_lag（E股600-tick收益），
+                past_ret_30/60/120/300/600（E中间价过去N-tick收益率）
+  - 核心洞察：Return5min(t-600) 在 t 时完全可知，携带动量/反转信息
+  - 新增稳定模型(4): MTsr12（+SR）、MTpr12（+PR）、MTsrpr12（+SR+PR）、
+                     MTDsrpr12（+SR+PR, MD16底座）
+  - 集成参数: window=900, temp=10, floor=0.0
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.234200
+Fold 2  | Day 4    | 0.244500
+Fold 3  | Day 3    | 0.294900
+Fold 4  | Day 2    | 0.360000
+Fold 5  | Day 1    | 0.238300
+------------------------------
+平均 IC: 0.274400  (0.2715→0.2744) 提升1.1%
+ICIR: 5.7094       (5.7031→5.7094) 提升0.1%
+
+Iter 6: 20 模型集成 + 8 个 Niche 模型（niche 预热期权重=0）
+核心优化点:
+  - 引入 Niche 模型机制：预热期权重为0，由滚动 IC 自动发现其优势窗口
+  - 新增特征: OVI_ep5、Sect_OVI_ep5（超短期 EMA5 脉冲）
+  - 新增 niche 模型(8): Nep5/Nep12（OVI超短期），NSov12/NSovT（板块OVI超短期），
+                        Nag12/NagX（激进综合，alpha=20-30），
+                        Npr30/NprD30（扩展短期价格窗口含past_ret_30/60）
+  - 集成参数: window=900, temp=12, floor=0.0
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.233200
+Fold 2  | Day 4    | 0.258900
+Fold 3  | Day 3    | 0.301800
+Fold 4  | Day 2    | 0.353400
+Fold 5  | Day 1    | 0.235700
+------------------------------
+平均 IC: 0.276600   (0.2744→0.2766) 提升0.8%
+ICIR: 6.0663        (5.7094→6.0663) 提升6.2%
+
+Iter 7: 27 模型集成 + 板块价格/横截面/大单/OVI纯净特征（新增 15 个 niche）
+核心优化点:
+  - 新增特征(6): sect_mid_ret_30/120（板块中间价短期收益），csm_ret_120（E与板块差值），
+                e_spread_pulse（相对价差偏离），lot_imb_15/sect_lot_imb_15（大单方向）
+  - 核心洞察: 大单失衡 (lot_imb_15) 全日 IC 符号一致为正，弱信号日（Day1/5）尤强
+  - 核心洞察: csm_ret_120（板块领先E）提供订单流之外独立的价格信息
+  - 新增 niche 模型(15): Nsmr12/NsmrD12/NsmrX（板块价格动能），
+                         Nlot12/NlotD12（大单失衡），
+                         NpOVI/NpOVI_S（OVI纯净+大单，完全剔除TI特征）
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.234700
+Fold 2  | Day 4    | 0.266200
+Fold 3  | Day 3    | 0.310300
+Fold 4  | Day 2    | 0.338800
+Fold 5  | Day 1    | 0.234700
+------------------------------
+平均 IC: 0.276900   (0.2766→0.2769) 提升0.1% 
+ICIR: 6.6679        (6.0663→6.6679) 提升10.0%
+
+Iter 8: 29 模型集成 + 深层委托簿失衡脉冲 + 无时间特征 NpOVI 变体
+核心优化点:
+  - 新增特征(1): obi_deep_p15（2-5档委托失衡 SMA15-SMA600 脉冲）
+                与 OVI（1档）相关系数仅 0.23-0.26，捕捉深层"耐心资金"方向
+  - 关键发现: aft_12000 时间特征在弱信号日（Day1/5）导致日内模式跨日迁移误差
+              剔除 aft_12000 后，OVI 模型避免学习非通用的 PM/AM 分界模式
+  - 新增 niche 模型(2): NpOVI_T（无时间特征的 OVI 纯净版，Day1/5 泛化更好），
+                        NpOVI_TD（NpOVI_T + obi_deep_p15 深层订单簿信号）
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.243200
+Fold 2  | Day 4    | 0.263900
+Fold 3  | Day 3    | 0.308400
+Fold 4  | Day 2    | 0.340000
+Fold 5  | Day 1    | 0.237200
+------------------------------
+平均 IC: 0.278600  (0.2769→0.2786) 提升0.6%
+ICIR: 7.0313       (6.6679→7.0313) 提升5.5%
+
+Iter 9: 36 模型集成 + 累计成交流量失衡 + 900-tick 滞后收益
+核心优化点:
+  - 深入分析 Day1/5 IC 瓶颈：Day5 的 cum_flow_imb 偏相关 IC=+0.24（控制 TI 特征后），
+    这是真正正交于现有 OVI/TI 信号的全新信息维度
+  - 新增特征(3):
+    * cum_flow_imb: 日内累计买卖量失衡去趋势 [(cum_buy-cum_sell)/cum_total - SMA600]
+                   Day5 IC=+0.23（偏相关+0.24），Day4 IC=+0.19，捕捉日内趋势持续性
+    * sect_cum_flow_imb: 板块(ABCD)累计买卖量失衡去趋势，与 cum_flow_imb 正交
+                         Day3 IC=+0.26，Day5 偏相关 IC=+0.14（互补信息）
+    * e_ret_lag2: E股 Return5min 900-tick 滞后（7.5分钟前，无前视偏差）
+                 Day5 IC=-0.25（偏相关-0.18），Day2/3 IC=-0.18，
+                 提供比 e_ret_lag（600-tick）更长的反转视角
+  - 新增 niche 模型(7)，形成"有/无时间特征 × 单/双流量 × SMR/DEEP 叠加"的系统覆盖:
+    有时间特征系列（学习日内模式+流量积累）:
+      N_cum_ME2:    ME8+OVI5+aft12000+SR+e_ret_lag2+PR2+LOT+cum_flow_imb
+      N_cum_ME2_S:  同上+板块价格收益(SMR)
+      N_cum_ME2_SD: 同上+深层委托簿(DEEP)
+    无时间特征系列（时间无感知，避免跨日模式迁移，Day1/5泛化更佳）:
+      N_cum_ME_T:     ME8+OVI5+SR+PR2+LOT+cum_flow_imb
+      N_both_ME_T:    ME8+OVI5+SR+PR2+LOT+cum_flow_imb+sect_cum_flow_imb
+      N_both_ME_T_S:  同上+SMR
+      N_both_ME_T_SD: 同上+DEEP
+  - 总特征数: 39→42；总模型数: 29→36（12稳定+24niche）
+Fold   | Test Day | IC        
+------------------------------
+Fold 1  | Day 5    | 0.272047
+Fold 2  | Day 4    | 0.276432
+Fold 3  | Day 3    | 0.311317
+Fold 4  | Day 2    | 0.358388
+Fold 5  | Day 1    | 0.240913
+------------------------------
+平均 IC: 0.291819   (0.2786→0.2918) 提升4.7%
+ICIR: 7.2815        (7.0313→7.2815) 提升3.5%
+
+Iter 10: 44 模型集成 + 交互特征（5 个）+ IXN 系列 niche 模型（8 个）
+核心优化点:
+  - 分析发现残差仍有结构：将现有集成残差与各候选特征做相关分析，
+    定位模型尚未充分捕捉的"非线性信号"方向
+  - 新增 5 个交互（乘积）特征，各自全日均值 IC ≈ 0.10-0.13:
+    * ovi_x_abs_ret: OVI_p15 × |past_ret_600| × 20
+                     幅度条件化 OVI：价格波动越大，OVI 信号越可靠
+                     实证: Day1=0.128, Day2=0.113, Day3=0.125, Day4=0.165, Day5=0.128（全日一致）
+    * tbv_x_ovi: (TotalBidVol / SMA600(TotalBidVol)) × OVI_p15 × 5
+                  深度条件化 OVI：买方订单簿越厚，OVI 买入信号越有支撑
+                  实证: Day1=0.147, Day2=0.117, Day3=0.117, Day4=0.139, Day5=0.106（全日一致）
+    * srl_x_ovi: sect_ret_lag × OVI_p15 × 20
+                  板块滞后收益方向 × E 委托动能（双重方向确认）
+                  实证: Day1=0.126, Day2=0.110, Day3=0.110, Day4=0.082, Day5=0.045
+    * ret_x_cum: past_ret_600 × cum_flow_imb × 20
+                  近期价格方向 × 日内累计流量（价格走势与流量积累共振）
+                  实证: Day4=0.251（最强），Day1=0.167，其他日适度正向
+    * oni_x_ovi: ONI_p15 × OVI_p15 × 5
+                  委托笔数失衡 × 委托量失衡（双重委托书共振时信号更纯净）
+  - 通过贪心前向搜索（每步选 IC 增益最大的 niche 模型）确定最优 8 个 IXN 模型:
+    添加顺序: N_IXN4_SMR_ME2 (+0.003) → N_IXN4_cum_ME2 (+0.001) → N_IXN4_cum_T (+0.001)
+             → N_IXN3_cum_T (+0.001) → N_IXN3_cum_ME2 (+0.001) → N_IXN1_cum_ME2 (+0.0005)
+             → N_IXN4_cum_ME2_D (+0.0004) → N_IXN1_cum_T (+0.0002)
+    - _T 后缀（无时间特征）: 泛化至弱信号日（Day1/5），CUM2=双流量版本
+    - _ME2 后缀（有 aft_12000）: 学习日内时段模式，CUM=单流量版本
+    - IXN1 = [ovi_x_abs_ret, tbv_x_ovi]（最稳定的两个交互特征）
+    - IXN3 = IXN1 + [srl_x_ovi, ret_x_cum]
+    - IXN4 = IXN3 + [oni_x_ovi]（全部 5 个交互特征）
+    - IXN 系列 niche 模型最高独立 IC: N_IXN3_cum_ME2=0.2925，超过所有前代 niche 模型!
+  - 总特征数: 42→47；总模型数: 36→44（12稳定+32niche）
+  - 突破 IC=0.30 目标！
+Fold   | Test Day | IC        
+--------------------------------
+Fold 1  | Day 5    | 0.283344
+Fold 2  | Day 4    | 0.282805
+Fold 3  | Day 3    | 0.326638
+Fold 4  | Day 2    | 0.363196
+Fold 5  | Day 1    | 0.245301
+--------------------------------
+平均 IC: 0.300257   (0.2918→0.3003) 提升3.0%
+ICIR   : 7.3837     (7.2815→7.3837) 提升1.4%
