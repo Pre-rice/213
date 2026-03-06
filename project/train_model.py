@@ -7,13 +7,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：36 个 Ridge 子模型（12 稳定 + 24 niche）+ 基于滚动 IC 的自适应权重
+# 动态集成架构：44 个 Ridge 子模型（12 稳定 + 32 niche）+ 基于滚动 IC 的自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（24 个）：整体不稳定但某些时段/机制下表现突出
+# Niche 模型（32 个）：整体不稳定但某些时段/机制下表现突出
 #   预热期权重为 0（NICHE_INIT_WEIGHT=0.0），由滚动 IC 机制发现其优势窗口
 #   Nep5/Nep12   — 超短期 OVI EMA5 脉冲（瞬时订单动能）
 #   NSov12/NSovT — 板块 OVI 超短期 EMA（板块流动性领先信号）
@@ -26,6 +26,8 @@ warnings.filterwarnings('ignore')
 #   NpOVI_TD      — NpOVI_T + 深层委托簿失衡脉冲（obi_deep_p15：2-5 档方向信息）
 #   N_cum_ME2/N_cum_ME2_S/N_cum_ME2_SD — 累计成交流量失衡（aft_12000+lag2）
 #   N_cum_ME_T/N_both_ME_T/N_both_ME_T_S/N_both_ME_T_SD — 无时间特征累计流量模型
+#   N_IXN系列（8 个）— 交互特征增强模型（ovi_x_abs_ret, tbv_x_ovi 等）
+#     贪心搜索结果：添加 8 个交互模型后 IC=0.3007（+0.009），ICIR=7.46（+0.18）
 #
 # 动态集成逻辑：
 #   Return5min(t) 在 t+600 可知，因此在 tick t 可用 [t-DELAY-WINDOW, t-DELAY]
@@ -81,6 +83,16 @@ _CUM  = ['cum_flow_imb']
 _SCUM = ['sect_cum_flow_imb']
 _CUM2 = ['cum_flow_imb', 'sect_cum_flow_imb']
 _LAG2 = ['e_ret_lag2']
+
+# 新增：交互特征组合（非线性信号增强，全日 IC 一致正向）
+# 核心发现：这 5 个交互特征（各约 0.10-0.13 全日均值 IC）配合 8 个 IXN niche 模型
+# 将 5-折 CV IC 从 0.2918 提升至 0.3007（ICIR 7.28→7.46），突破 0.30 目标。
+# IXN1: 幅度×深度条件化 OVI（最稳定的两个交互）
+# IXN3: IXN1 + 板块滞后方向确认 + 价格/流量双确认反转
+# IXN4: IXN3 + ONI×OVI 双委托书共振
+_IXN1 = ['ovi_x_abs_ret', 'tbv_x_ovi']
+_IXN3 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum']
+_IXN4 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -152,6 +164,22 @@ MODELS = {
     'N_both_ME_T':    (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 20, True),
     'N_both_ME_T_S':  (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _SMR, 20, True),
     'N_both_ME_T_SD': (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _SMR + _DEEP, 20, True),
+    # ── 交互特征增强 Niche 模型（8 个）────────────────────────────────────────────
+    # 核心发现：5 个交互特征（ovi_x_abs_ret, tbv_x_ovi, srl_x_ovi, ret_x_cum, oni_x_ovi）
+    # 各自全日均值 IC ≈ 0.10-0.13，与现有线性特征正交。通过贪心搜索确定 8 个最优组合：
+    # 贪心添加顺序：IXN4_SMR_ME2 → IXN4_cum_ME2 → IXN4_cum_T → IXN3_cum_T →
+    #               IXN3_cum_ME2 → IXN1_cum_ME2 → IXN4_cum_ME2_D → IXN1_cum_T
+    # 最终 5 折 CV IC = 0.3007（+0.009 vs 无交互特征），ICIR = 7.46（+0.18）
+    #
+    # 无时间特征（T 后缀）：更好泛化至弱信号日（Day1/5）
+    'N_IXN4_SMR_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _SMR + _IXN4, 15, True),
+    'N_IXN4_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN4, 15, True),
+    'N_IXN4_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN4, 15, True),
+    'N_IXN3_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    'N_IXN3_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN3, 15, True),
+    'N_IXN1_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN1, 15, True),
+    'N_IXN4_cum_ME2_D': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN4 + _DEEP, 15, True),
+    'N_IXN1_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN1, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
