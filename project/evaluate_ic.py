@@ -1,6 +1,5 @@
 # 评估output与原数据return5min的5日IC值
 # 运行本程序会自动先运行main.py
-# 第1-4日为训练集，第5日为测试集，重点关注第5日IC，以及IC的稳定性，ICIR为综合衡量指标
 
 import os
 import pandas as pd
