@@ -222,11 +222,12 @@ def process_day_data(day_data):
     # past_ret_120/300/600: E股中间价在过去 1/2.5/5 分钟内的收益率
 
     def _fillna_daymean(arr):
-        """用有效值（非NaN）的均值替代NaN，避免用0填充冷启动期"""
+        """用有效值（非NaN）的均值替代NaN，避免用0填充冷启动期
+        若当日无任何有效值（极端情况，如数据损坏），则退化为0.0（中性值）"""
         s = pd.Series(arr)
         valid_mean = s.dropna().mean()
         if np.isnan(valid_mean):
-            valid_mean = 0.0
+            valid_mean = 0.0  # 极端情况退化：整日无有效收益数据时使用中性值
         return s.fillna(valid_mean).values
 
     sect_ret_arr = np.zeros(len(e))
