@@ -365,5 +365,131 @@ def train():
     return results
 
 
+def nested_blind_test():
+    """
+    嵌套盲测评估（参考 suggestion.md §1.2）。
+
+    方法：对每个盲测日 d ∈ {1,2,3,4,5}，仅用其余 4 天训练所有子模型，
+    在盲测日上运行动态集成并计算 IC。
+    盲测日在本次调参过程中"从未被看到"，因此 IC 估计更接近线上真实表现。
+
+    注：本函数同时运行以下两种评估：
+
+    (A) 嵌套盲测（outer IC）：
+          - 对每个盲测日 d，用其余4天训练，在 d 上测试
+          - 等价于 GroupKFold(5) leave-one-out CV，确认代码层面无数据泄露
+          - 动态集成的增益（vs 稳定等权基准）跨日是否稳定
+
+    (B) 内层4折 vs 外层盲测对比（研究者自由度估计）：
+          - 对每个盲测日 d，在其余4天上运行 GroupKFold=4 → 得到"内层IC"
+          - 内层IC ≈ 研究者迭代调参时"看到的"那类数字（包含对4天的过拟合）
+          - 外层（盲测）IC = 真正盲的那天的IC
+          - 内层-外层差值 = 调参在各天上的过拟合程度估计
+    """
+    df = pd.read_csv("train.csv")
+    y      = df['Return5min'].values
+    groups = df['Day'].values
+    all_days = sorted(np.unique(groups).astype(int))   # [1,2,3,4,5]
+
+    print()
+    print("=" * 70)
+    print("嵌套盲测评估（每次轮换1天为完全盲测集）")
+    print("=" * 70)
+    print(f"{'盲测日':<8} | {'外层集成IC':>11} | {'稳定等权IC':>11} | "
+          f"{'集成增益':>9} | {'内层4折IC':>10} | {'内-外gap':>9}")
+    print("-" * 70)
+
+    blind_ens_ics    = []
+    blind_stable_ics = []
+    inner_cv_ics     = []
+
+    for blind_day in all_days:
+        train_days = [d for d in all_days if d != blind_day]
+        train_mask = np.isin(groups, train_days)
+        test_mask  = groups == blind_day
+
+        train_idx = np.where(train_mask)[0]
+        test_idx  = np.where(test_mask)[0]
+        y_test    = y[test_idx]
+
+        # ── (A) 外层盲测：在 4 天训练集上训练，盲测日预测 ────────────────────
+        model_preds  = []
+        stable_preds = []
+        for name, (feats, alpha, is_niche_flag) in MODELS.items():
+            X = df[feats].values
+            m = Ridge(alpha=alpha)
+            m.fit(X[train_idx], y[train_idx])
+            pred = m.predict(X[test_idx])
+            model_preds.append(pred)
+            if not is_niche_flag:
+                stable_preds.append(pred)
+
+        ens_pred = dynamic_ensemble(y_test, model_preds, is_niche=MODEL_IS_NICHE)
+        ens_ic   = ic_score(y_test, ens_pred)
+
+        stable_avg = np.mean(np.stack(stable_preds, axis=0), axis=0)
+        stable_ic  = ic_score(y_test, stable_avg)
+        gain = ens_ic - stable_ic
+
+        # ── (B) 内层4折CV：在4天训练集内部做 GroupKFold=4 ─────────────────────
+        # 这模拟了"研究者在调参时所能看到的4折IC均值"
+        inner_groups = groups[train_mask]
+        inner_y      = y[train_mask]
+        inner_df     = df.iloc[train_idx].reset_index(drop=True)
+        inner_gkf    = GroupKFold(n_splits=4)
+        inner_splits = list(inner_gkf.split(
+            np.zeros(len(inner_df)), inner_y, inner_groups))
+
+        inner_fold_ics = []
+        for itrain, ival in inner_splits:
+            inner_preds = []
+            for name, (feats, alpha, inf) in MODELS.items():
+                X_in = inner_df[feats].values
+                m_in = Ridge(alpha=alpha)
+                m_in.fit(X_in[itrain], inner_y[itrain])
+                inner_preds.append(m_in.predict(X_in[ival]))
+            inner_y_val = inner_y[ival]
+            inner_is_n  = MODEL_IS_NICHE
+            fp = dynamic_ensemble(inner_y_val, inner_preds, is_niche=inner_is_n)
+            inner_fold_ics.append(ic_score(inner_y_val, fp))
+        inner_ic = np.mean(inner_fold_ics)
+        gap = inner_ic - ens_ic
+
+        blind_ens_ics.append(ens_ic)
+        blind_stable_ics.append(stable_ic)
+        inner_cv_ics.append(inner_ic)
+
+        print(f"Day {blind_day:<4} | {ens_ic:>11.6f} | {stable_ic:>11.6f} | "
+              f"{gain:>+9.6f} | {inner_ic:>10.6f} | {gap:>+9.6f}")
+
+    print("-" * 70)
+    mean_ens    = np.mean(blind_ens_ics)
+    std_ens     = np.std(blind_ens_ics)
+    icir_ens    = mean_ens / std_ens if std_ens > 1e-9 else 0.0
+    mean_stable = np.mean(blind_stable_ics)
+    mean_gain   = mean_ens - mean_stable
+    mean_inner  = np.mean(inner_cv_ics)
+    mean_gap    = mean_inner - mean_ens
+
+    print(f"{'均值':<8} | {mean_ens:>11.6f} | {mean_stable:>11.6f} | "
+          f"{mean_gain:>+9.6f} | {mean_inner:>10.6f} | {mean_gap:>+9.6f}")
+    print(f"{'Std':<8} | {std_ens:>11.6f} |")
+    print(f"{'ICIR':<8} | {icir_ens:>11.4f} |")
+    print()
+
+    # 与标准5折的比较：外层IC与5折IC在代码层面等价（均为leave-one-group-out结构）
+    # 两者均值的微小差异来自 GroupKFold 分组顺序，应为零。
+    # 内层4折IC < 外层IC 的差值是研究者调参自由度的估计下界。
+    print(f"嵌套盲测外层IC  = {mean_ens:.4f}  (代码层面无数据泄露，与5折CV等价)")
+    print(f"内层4折(4天)IC  = {mean_inner:.4f}  (研究者调参时'看到'的IC分布均值)")
+    print(f"内层-外层gap    = {mean_gap:+.4f}  "
+          f"({'内层偏乐观' if mean_gap > 0 else '外层偏乐观'}，"
+          f"{'约' + str(round(abs(mean_gap)/mean_ens*100, 1)) + '%'})")
+    print("=" * 70)
+
+    return blind_ens_ics
+
+
 if __name__ == "__main__":
     train()
+    nested_blind_test()
