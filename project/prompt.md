@@ -1,5 +1,3 @@
-以下是一个量化交易场景的机器学习比赛，请仔细阅读并分析比赛要求。我已经写了一个初步的版本，你将基于此版本不断优化模型。
-
 # 比赛题目说明
 ### 股票未来收益率预测
 **板块效应**指的是股票市场中同一板块的个股因共同特点或关联题材，呈现协同涨跌的联动现象。因而我们可以利用板块效应来分析股票的未来收益率。
@@ -66,101 +64,6 @@ Example/
 └── other            # 其余文件
 ```
 
-#### main.py
-import pandas as pd
-import numpy as np
-from utils import *
-from MyModel import MyModel
-
-def run_test():
-    #########Load Model
-    model = MyModel()
-
-    #########Load Day Data
-    days = get_day_folders("./data")
-
-    #########Online Predict
-    for day in days:
-        model.reset()
-        
-        day_data = load_day_data("./data", day)
-        n_ticks = len(day_data['E'])
-
-        ticktimes = day_data['E'].values.T[0, :]
-        my_preds = np.zeros((n_ticks))
-
-        for tick_index in range(n_ticks):
-            ###########Get Tick Data(E and Sector)
-            E_row_data = day_data['E'].iloc[tick_index]
-            sector_row_datas = [
-                day_data['A'].iloc[tick_index],
-                day_data['B'].iloc[tick_index],
-                day_data['C'].iloc[tick_index],
-                day_data['D'].iloc[tick_index]
-            ]
-
-            ###########Predict
-            my_preds[tick_index] = model.online_predict(E_row_data, sector_row_datas)
-
-        ###########Save Data
-        if os.path.exists("./output/"+day) is not True:
-            os.makedirs("./output/"+day)
-        out_frame = pd.DataFrame(np.vstack(([ticktimes, my_preds])).T)
-        columns = ['Time', 'Predict']
-        out_frame.columns = columns
-        out_frame.to_csv("./output/"+day+"/E.csv", index=False)
-        print ("Submit Day", day)
-    
-if __name__ == '__main__':
-    run_test()
-
-#### utils.py
-import os
-import pandas as pd
-import numpy as np
-
-def get_day_folders(data_path):
-    folders = []
-    for name in os.listdir(data_path):
-        full_path = os.path.join(data_path, name)
-        if os.path.isdir(full_path) and name.isdigit():
-            folders.append(name)
-    folders.sort(key=lambda x: int(x))
-    return folders
-
-def load_day_data(data_path, day_folder):
-    day_path = os.path.join(data_path, day_folder)
-    data = {}
-    for stock in ['A', 'B', 'C', 'D', 'E']:
-        csv_path = os.path.join(day_path, f'{stock}.csv')
-        if os.path.exists(csv_path):
-            data[stock] = pd.read_csv(csv_path)
-        else:
-            raise FileNotFoundError(f"Missing file: {csv_path}")
-    return data
-
-
-def clean_data(data):
-    data = np.where(np.isnan(data), 0, data)
-    data = np.where(np.isinf(data), 0, data)
-    data = np.where(np.isinf(-data), 0, data)
-    return data
-
-
-def evaluate_ic(my_preds, ground_truth):
-    data = np.vstack((my_preds, ground_truth))
-    data = clean_data(data)
-    cor = np.corrcoef(data)[0, 1]
-    return cor
-      
-#### data格式
-data目录下有12345五个文件夹代表五天数据，每个文件夹下有ABCDE五个.csv文件保存五只股票的数据，每个文件有27602行，例如data/1/E.csv的前几行如下：
-Time,BidPrice1,BidPrice2,BidPrice3,BidPrice4,BidPrice5,BidVolume1,BidVolume2,BidVolume3,BidVolume4,BidVolume5,AskPrice1,AskPrice2,AskPrice3,AskPrice4,AskPrice5,AskVolume1,AskVolume2,AskVolume3,AskVolume4,AskVolume5,OrderBuyNum,OrderSellNum,OrderBuyVolume,OrderSellVolume,TradeBuyNum,TradeSellNum,TradeBuyVolume,TradeSellVolume,TradeBuyAmount,TradeSellAmount,LastPrice,Return5min
-93000000,5454,5450,5448,5446,5445,3000,900,1400,1700,100,5455,5456,0,0,0,123700,1867732,0,0,0,2995,2025,6783200,4355432,866,1405,629400,1614300,3433377000,8806006500,5455,-0.05666408368849283
-93000500,5355,5320,5311,5310,5306,200,2700,1300,600,700,5399,5400,5401,5404,5407,500,14000,2800,1100,100,621,940,1609000,1720832,1295,109,1461900,76200,7955343298,411804500,5399,-0.041448770094906065
-93001000,5386,5300,5292,5291,5288,2400,5700,1000,100,2400,5426,5436,5438,5440,5441,1300,800,400,59673,600,299,542,370300,905685,364,44,265600,24800,1437979600,131694800,5436,-0.04736995059575705
-93001500,5400,5380,5303,5300,5292,7300,200,600,5300,1000,5445,5446,5447,5448,5449,4673,37800,6800,37700,14300,302,390,304900,636900,334,24,248700,12200,1349522435,65545900,5445,-0.049042367962855486
-
 #### 接口规范
 
 `MyModel.py` 中的模型类 `MyModel` 必须实现以下两个方法(其余辅助方法的名称和实现完全自由)：
@@ -185,13 +88,6 @@ class MyModel:
         """
         pass
 ```
-
-#### requirements.txt
-numpy==1.26.4
-pandas==3.0.0
-matplotlib==3.8.2
-scikit-learn==1.4.0
-lightGBM==4.6.0
 
 #### 重要提示
 
