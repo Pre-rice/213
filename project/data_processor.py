@@ -49,9 +49,10 @@ def process_day_data(day_data):
     ── E 委托笔数失衡 (ONI) 脉冲 ────────────────────────────────────────────────
      14.  ONI_p15             - ONI SMA15 - SMA600
      15.  ONI_p30             - ONI SMA30 - SMA600
+     16.  ONI_ep15            - ONI EMA15 - EMA600 (指数加权短期委托笔数失衡，Day1 IC≈0.20)
 
     ── E 成交笔数失衡 EMA 脉冲 ─────────────────────────────────────────────────
-     16.  TNI_ep15            - TNI EMA15 - EMA600
+     17.  TNI_ep15            - TNI EMA15 - EMA600
 
     ── 板块均值信号 ─────────────────────────────────────────────────────────────
      17.  Sect_OBI1           - 板块 (ABCD) 一档委托失衡均值
@@ -74,6 +75,8 @@ def process_day_data(day_data):
      30.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
      31.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
      32.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
+     33.  past_ret_900        - E 中间价过去 7.5 分钟收益率 (900 ticks)
+                                Day5 IC=+0.26（均值回复），Day3 IC=+0.20，Day1 IC=+0.17
 
     ── 板块短期价格收益率 & 横截面相对收益（新增）────────────────────────────
      33.  sect_mid_ret_30     - 板块(ABCD)平均中间价过去 15 秒收益率 (订单流外的价格信息)
@@ -143,6 +146,9 @@ def process_day_data(day_data):
     tni_e15  = _ema(e_tni,  15).values
     tni_e600 = _ema(e_tni, 600).values
 
+    oni_e15  = _ema(e_oni,  15).values
+    oni_e600 = _ema(e_oni, 600).values
+
     feats = {
         'TotalBidVol':   TotalBidVol,
         'TradeImb_600':  ti_600,
@@ -159,6 +165,7 @@ def process_day_data(day_data):
         'OVI_ep5':       ovi_e5  - ovi_e600,
         'ONI_p15':       oni_15  - oni_600,
         'ONI_p30':       oni_30  - oni_600,
+        'ONI_ep15':      oni_e15 - oni_e600,
         'TNI_ep15':      tni_e15 - tni_e600,
     }
 
@@ -242,7 +249,7 @@ def process_day_data(day_data):
 
     mid = (e['BidPrice1'].values + e['AskPrice1'].values) / 2.0
     mid_s = pd.Series(mid)
-    for lag in (30, 60, 120, 300, 600):
+    for lag in (30, 60, 120, 300, 600, 900):
         clip = _RET_CLIP_SHORT if lag <= 60 else _RET_CLIP_LONG
         ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).values
         ret = np.clip(_fillna_daymean(ret), -clip, clip)
@@ -403,12 +410,13 @@ def process_day_data(day_data):
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
         'TradeImb_p15', 'TradeImb_p30', 'TradeImb_p40', 'TradeImb_p60', 'TradeImb_ep60',
         'OVI_p15', 'OVI_p30', 'OVI_p60', 'OVI_ep15', 'OVI_ep5',
-        'ONI_p15', 'ONI_p30', 'TNI_ep15',
+        'ONI_p15', 'ONI_p30', 'ONI_ep15', 'TNI_ep15',
         'Sect_OBI1', 'E_TI_rel_600', 'Sect_TI_p40', 'Sect_OVI_p20', 'Sect_ONI_p30',
         'Sect_OVI_ep5', 'Sect_OVI_ep15',
         'aft_13800', 'aft_12000',
         'sect_ret_lag', 'e_ret_lag',
         'past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600',
+        'past_ret_900',
         # 新增：板块短期价格收益率 + 横截面相对收益 + E 价差脉冲 + 大单成交失衡
         'sect_mid_ret_30', 'sect_mid_ret_120', 'csm_ret_120', 'e_spread_pulse',
         'lot_imb_15', 'sect_lot_imb_15',

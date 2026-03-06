@@ -7,30 +7,29 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：31 个 Ridge 子模型（12 稳定 + 19 niche）+ 保守化自适应权重
+# 动态集成架构：33 个 Ridge 子模型（12 稳定 + 21 niche）+ 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（19 个，原32个按信号族去冗余后保留）：
-#   剔除13个冗余/弱泛化模型（Nep5/12, NSov12, NpOVI系列4个,
-#   N_cum_ME2_S/SD, N_both_ME_T_S/SD, N_IXN1_cum_ME2/T），
-#   保留每族最强代表，同时保持 ME2(aft_12000) 和 T(无时间特征) 的互补覆盖：
-#   NSovT, Nag12/NagX, Npr30/NprD30, Nsmr12/NsmrD12/NsmrX,
-#   Nlot12/NlotD12, N_cum_ME2, N_cum_ME_T/N_both_ME_T,
-#   N_IXN4/3 ME2/T 系列（8个）
+# Niche 模型（21 个，Iter13 新增 2 个）：
+#   31-model基础上新增 N_oni9_ME2 和 N_oni9_T（使用 ONI_ep15 + past_ret_900）
+#   ONI_ep15: EMA委托笔数失衡（Day1 IC=+0.20，与SMA ONI互补的动态视角）
+#   past_ret_900: 7.5分钟价格收益率（Day5 IC=+0.26，Day3=+0.20，Day1=+0.17）
 #
-# 动态集成改进（参考 suggestion.md §1.1 A/B）：
-#   (A) 权重更新频率降低至每 UPDATE_FREQ=30 tick 更新一次，减少噪声驱动抖动
-#   (B) 用 EWMA 平滑的 IC（β=EWMA_BETA=0.02）替代原始 rolling corr，更稳定
+# Iter13 优化（内层4折IC为目标，嵌套交叉验证参数搜索）：
+#   集成参数（网格搜索 5×4 嵌套CV，300+ 组合）：
+#     WINDOW: 900→600（更快适应当日IC结构）
+#     TEMP: 12→15（更积极集中权重到强IC模型）
+#     EWMA_BETA: 0.02→0.01（IC估计更稳定，与高频更新互补）
+#     UPDATE_FREQ: 30→15（更频繁更新，与稳定IC估计配合）
+#   效果（嵌套盲测验证）：
+#     内层4折IC: 0.2891→0.2911（+0.002）
+#     外层IC: 0.3003→0.3043（+0.004）
+#     Day1: 0.243→0.252(+0.009), Day5: 0.279→0.294(+0.015)（硬日显著改善）
+#     Day2/3: 基本持平，Day4: 轻微下降(-0.009)
 #
-# CV 验证结果（31 模型 + update=30 + ewma=0.02 vs 原始 44 模型）：
-#   Mean IC: 0.3003（相同），ICIR: 7.163
-#   Day1=0.243, Day2=0.366, Day3=0.324, Day4=0.289, Day5=0.279
-#
-# 注：suggestion §1.1 C（降 temp/提 floor）和 §3.2（stable_prior）
-#     在本数据集 CV 验证中均使所有日 IC 下降，故不采用。
 # ════════════════════════════════════════════════════════════════════════════════
 
 _BASE14 = [
@@ -50,12 +49,17 @@ _ME8 = [
     'TotalBidVol', 'OVI_p15', 'OVI_p60', 'OVI_ep15',
     'ONI_p15', 'Sect_OBI1', 'Sect_OVI_p20', 'TNI_ep15',
 ]
+# ME8 扩展版：增加 ONI_ep15（EMA 委托笔数失衡，Day1 IC=+0.20，与 ONI_p15 互补）
+_ME9 = _ME8 + ['ONI_ep15']
 _MD16 = _BASE14 + ['Sect_ONI_p30', 'OVI_p30']
 
 # 滞后已实现收益特征组合（无前视偏差，所有值均在预测时刻可知）
 _SR  = ['sect_ret_lag', 'e_ret_lag']
 _PR  = ['past_ret_120', 'past_ret_300', 'past_ret_600']
 _PR2 = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600']
+# 新增：扩展至 900-tick（7.5 分钟）。past_ret_900 在 Day5 IC=+0.26，Day3=+0.20，Day1=+0.17，
+# 比 past_ret_600 在 Day5 更强（均值回复信号在更长时间轴延续）。Day4=-0.03（轻微负，可接受）
+_PR3 = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600', 'past_ret_900']
 
 # 超短期 OVI EMA 脉冲（高方差，对部分日期非常强，适合 niche 模型）
 _OVI5 = ['OVI_ep5', 'Sect_OVI_ep5']
@@ -154,27 +158,47 @@ MODELS = {
     'N_IXN3_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
     'N_IXN3_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN3, 15, True),
     'N_IXN4_cum_ME2_D': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN4 + _DEEP, 15, True),
+    # ── 新增 Niche 模型（Iter13，利用 ONI_ep15 + past_ret_900 新特征）──────────
+    # 筛选原则：ONI_ep15 在 Day1 IC=+0.20（与 ONI_p15 互补），past_ret_900 在 Day5 IC=+0.26。
+    # 在内层4折IC评估中验证确有增益后加入（见 Iter13 分析）。
+    #
+    # N_oni9_ME2: ME9（含ONI_ep15）+ aft_12000 + SR + PR3（含past_ret_900）+ LOT + CUM
+    #   → 在 Day1/5 更强的委托笔数动态（EMA ONI）+ 更长时间轴价格信号（900tick）
+    'N_oni9_ME2':     (_ME9 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_oni9_T:    ME9 + SR + PR3 + LOT + CUM2（无时间特征，Day5 最优配置）
+    #   → 与 N_cum_ME_T 类似但加入 ONI_ep15 和 past_ret_900
+    'N_oni9_T':       (_ME9 + _OVI5 + _SR + _PR3 + _LOT + _CUM2, 20, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
 # is_niche flag per model (same order as MODEL_NAMES)
 MODEL_IS_NICHE = [v[2] for v in MODELS.values()]
 
-# 动态集成超参数（优化后，参考 suggestion.md §1.1）
-ENSEMBLE_WINDOW     = 900   # 滚动 IC 窗口 (tick 数，约 7.5 分钟)
-ENSEMBLE_TEMP       = 12    # softmax 温度（维持原值，CV验证保守降温会显著降IC）
-ENSEMBLE_FLOOR      = 0.0   # 权重下限（维持原值，floor>0 在本数据集会降IC）
-RETURN_DELAY        = 600   # Return5min 可知延迟 = 5 分钟 / 0.5s = 600 ticks
-NICHE_INIT_WEIGHT   = 0.0   # niche 模型预热期权重（0 = 完全等待滚动IC发现价值）
+# 动态集成超参数（Iter13 内层4折IC优化后）
+# 网格搜索结果（5 outer × 4 inner 嵌套交叉验证，以内层4折IC为目标）：
+#   最优配置: window=600, temp=15, ewma_beta=0.01, update_freq=15
+#   内层4折IC: 0.2911（基线0.2891，+0.002），外层IC: 0.3043（基线0.3003，+0.004）
+#   优化逻辑：更短窗口（600 vs 900）= 更快适应当日IC结构；
+#             更高温度（15 vs 12）= 更积极集中权重到强IC模型；
+#             更慢EWMA（0.01 vs 0.02）= IC估计更稳定，与高频更新互补；
+#             更频繁更新（15 vs 30）= 减少权重滞后，与稳定IC估计配合。
+#   per-day外层IC对比（基线→最优）：
+#     Day1: 0.2434→0.2517(+0.008), Day2: 0.3664→0.3669, Day3: 0.3242→0.3290(+0.005),
+#     Day4: 0.2885→0.2799(-0.009), Day5: 0.2787→0.2939(+0.015)
+#   硬日（Day1/5）显著提升，软日（Day2/3）基本持平，Day4轻微下降。
+ENSEMBLE_WINDOW     = 600    # 滚动 IC 窗口 (tick 数，约 5 分钟；Iter13优化 900→600)
+ENSEMBLE_TEMP       = 15     # softmax 温度（Iter13优化 12→15，更积极集中）
+ENSEMBLE_FLOOR      = 0.0    # 权重下限（CV验证 floor>0 在本数据集会降IC）
+RETURN_DELAY        = 600    # Return5min 可知延迟 = 5 分钟 / 0.5s = 600 ticks
+NICHE_INIT_WEIGHT   = 0.0    # niche 模型预热期权重（0 = 完全等待滚动IC发现价值）
 
-# 新增稳定化参数（suggestion.md §1.1 A/B 条）
-# 注：suggestion §1.1 C 建议降 temp/提 floor，但CV验证显示在本数据集中反效果
-# （任何 temp<12 或 floor>0 的组合均使每一日 IC 降低，包括最弱日 Day1/Day5）
-# 因此仅采用成本极低且理论合理的 A/B 两条：
-ENSEMBLE_UPDATE_FREQ = 30   # 权重更新频率（每 30 tick 更新一次，减少噪声驱动抖动）
-ENSEMBLE_EWMA_BETA   = 0.02 # IC 的 EWMA alpha 系数（pandas ewm 约定：α小 → 慢更新→更稳定）
-                            # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.02 → 历史权重0.98
-STABLE_PRIOR        = 0.0   # 稳定模型权重下限（CV验证 stable_prior>0 持续降IC，不采用）
+# 稳定化参数（Iter13内层4折网格搜索优化）
+ENSEMBLE_UPDATE_FREQ = 15    # 权重更新频率（Iter13优化 30→15，更频繁但IC估计更稳定）
+ENSEMBLE_EWMA_BETA   = 0.01  # IC 的 EWMA alpha 系数（Iter13优化 0.02→0.01，更慢更稳）
+                             # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.01 → 历史权重0.99
+                             # 注：更慢EWMA与更频繁更新（update_freq=15）互补：
+                             #     每次用稳定IC估计更新权重，而非减少更新次数来规避噪声
+STABLE_PRIOR        = 0.0    # 稳定模型权重下限（CV验证 stable_prior>0 持续降IC，不采用）
 
 
 def ic_score(y_true, y_pred):
