@@ -27,7 +27,7 @@ warnings.filterwarnings('ignore')
 #   N_cum_ME2/N_cum_ME2_S/N_cum_ME2_SD — 累计成交流量失衡（aft_12000+lag2）
 #   N_cum_ME_T/N_both_ME_T/N_both_ME_T_S/N_both_ME_T_SD — 无时间特征累计流量模型
 #   N_IXN系列（8 个）— 交互特征增强模型（ovi_x_abs_ret, tbv_x_ovi 等）
-#     贪心搜索结果：添加 8 个交互模型后 IC=0.3007（+0.009），ICIR=7.46（+0.18）
+#     贪心搜索结果：添加 8 个交互模型后 IC=0.3003（+0.009），ICIR=7.38（+0.10）
 #
 # 动态集成逻辑：
 #   Return5min(t) 在 t+600 可知，因此在 tick t 可用 [t-DELAY-WINDOW, t-DELAY]
@@ -86,7 +86,7 @@ _LAG2 = ['e_ret_lag2']
 
 # 新增：交互特征组合（非线性信号增强，全日 IC 一致正向）
 # 核心发现：这 5 个交互特征（各约 0.10-0.13 全日均值 IC）配合 8 个 IXN niche 模型
-# 将 5-折 CV IC 从 0.2918 提升至 0.3007（ICIR 7.28→7.46），突破 0.30 目标。
+# 将 5-折 CV IC 从 0.2918 提升至 0.3003（ICIR 7.28→7.38），突破 0.30 目标。
 # IXN1: 幅度×深度条件化 OVI（最稳定的两个交互）
 # IXN3: IXN1 + 板块滞后方向确认 + 价格/流量双确认反转
 # IXN4: IXN3 + ONI×OVI 双委托书共振
@@ -169,7 +169,7 @@ MODELS = {
     # 各自全日均值 IC ≈ 0.10-0.13，与现有线性特征正交。通过贪心搜索确定 8 个最优组合：
     # 贪心添加顺序：IXN4_SMR_ME2 → IXN4_cum_ME2 → IXN4_cum_T → IXN3_cum_T →
     #               IXN3_cum_ME2 → IXN1_cum_ME2 → IXN4_cum_ME2_D → IXN1_cum_T
-    # 最终 5 折 CV IC = 0.3007（+0.009 vs 无交互特征），ICIR = 7.46（+0.18）
+    # 最终 5 折 CV IC = 0.3003（+0.009 vs 无交互特征），ICIR = 7.38（+0.10）
     #
     # 无时间特征（T 后缀）：更好泛化至弱信号日（Day1/5）
     'N_IXN4_SMR_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _SMR + _IXN4, 15, True),
