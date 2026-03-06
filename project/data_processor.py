@@ -2,6 +2,10 @@ import numpy as np
 import pandas as pd
 from utils import get_day_folders, load_day_data
 
+# 收益率剪裁阈值（防止极端值）
+_RET_CLIP_LONG  = 0.1    # 长窗口（≥120 tick）收益率剪裁
+_RET_CLIP_SHORT = 0.05   # 短窗口（30/60 tick）收益率剪裁
+
 
 def _imb(a, b):
     """通用失衡公式: (a - b) / (a + b + 1e-6)"""
@@ -21,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 27 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 32 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -40,31 +44,36 @@ def process_day_data(day_data):
      10.  OVI_p30             - OVI SMA30 - SMA600
      11.  OVI_p60             - OVI SMA60 - SMA600 (中期挂单动能)
      12.  OVI_ep15            - OVI EMA15 - EMA600
+     13.  OVI_ep5             - OVI EMA5  - EMA600 (超短期，供 niche 模型使用)
 
     ── E 委托笔数失衡 (ONI) 脉冲 ────────────────────────────────────────────────
-     13.  ONI_p15             - ONI SMA15 - SMA600
-     14.  ONI_p30             - ONI SMA30 - SMA600
+     14.  ONI_p15             - ONI SMA15 - SMA600
+     15.  ONI_p30             - ONI SMA30 - SMA600
 
     ── E 成交笔数失衡 EMA 脉冲 ─────────────────────────────────────────────────
-     15.  TNI_ep15            - TNI EMA15 - EMA600
+     16.  TNI_ep15            - TNI EMA15 - EMA600
 
     ── 板块均值信号 ─────────────────────────────────────────────────────────────
-     16.  Sect_OBI1           - 板块 (ABCD) 一档委托失衡均值
-     17.  E_TI_rel_600        - E 的长期 TI 相对板块偏差 (均值回复)
-     18.  Sect_TI_p40         - 板块成交量失衡 SMA40 脉冲
-     19.  Sect_OVI_p20        - 板块委托量失衡 SMA20 脉冲
-     20.  Sect_ONI_p30        - 板块委托笔数失衡 SMA30 脉冲
+     17.  Sect_OBI1           - 板块 (ABCD) 一档委托失衡均值
+     18.  E_TI_rel_600        - E 的长期 TI 相对板块偏差 (均值回复)
+     19.  Sect_TI_p40         - 板块成交量失衡 SMA40 脉冲
+     20.  Sect_OVI_p20        - 板块委托量失衡 SMA20 脉冲
+     21.  Sect_ONI_p30        - 板块委托笔数失衡 SMA30 脉冲
+     22.  Sect_OVI_ep5        - 板块委托量失衡 EMA5  - EMA600 (超短期板块动能)
+     23.  Sect_OVI_ep15       - 板块委托量失衡 EMA15 - EMA600
 
     ── 日内时间特征 ─────────────────────────────────────────────────────────────
-     21.  aft_13800           - tick_index > 13800 二值 (交易日后半段指示)
-     22.  aft_12000           - tick_index > 12000 二值 (稍早分界，与 21 互补)
+     24.  aft_13800           - tick_index > 13800 二值 (交易日后半段指示)
+     25.  aft_12000           - tick_index > 12000 二值 (稍早分界，与 24 互补)
 
     ── 滞后已实现收益特征 ─────────────────────────────────────────────────────
-     23.  sect_ret_lag        - 板块(ABCD)过去5分钟平均已实现收益（动量/反转）
-     24.  e_ret_lag           - E 过去5分钟已实现收益（均值回复信号）
-     25.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
-     26.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
-     27.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
+     26.  sect_ret_lag        - 板块(ABCD)过去5分钟平均已实现收益（动量/反转）
+     27.  e_ret_lag           - E 过去5分钟已实现收益（均值回复信号）
+     28.  past_ret_30         - E 中间价过去 15 秒收益率 (30 ticks)
+     29.  past_ret_60         - E 中间价过去 30 秒收益率 (60 ticks)
+     30.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
+     31.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
+     32.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
     """
     e = day_data['E']
 
@@ -88,6 +97,7 @@ def process_day_data(day_data):
     ovi_15   = _sma(e_ovi,  15).values
     ovi_30   = _sma(e_ovi,  30).values
     ovi_60   = _sma(e_ovi,  60).values
+    ovi_e5   = _ema(e_ovi,   5).values
     ovi_e15  = _ema(e_ovi,  15).values
     ovi_e600 = _ema(e_ovi, 600).values
 
@@ -111,6 +121,7 @@ def process_day_data(day_data):
         'OVI_p30':       ovi_30  - ovi_600,
         'OVI_p60':       ovi_60  - ovi_600,
         'OVI_ep15':      ovi_e15 - ovi_e600,
+        'OVI_ep5':       ovi_e5  - ovi_e600,
         'ONI_p15':       oni_15  - oni_600,
         'ONI_p30':       oni_30  - oni_600,
         'TNI_ep15':      tni_e15 - tni_e600,
@@ -136,14 +147,19 @@ def process_day_data(day_data):
     s_ti_40   = _sma(sect_ti,   40).values
     s_ovi_600 = _sma(sect_ovi, 600).values
     s_ovi_20  = _sma(sect_ovi,  20).values
+    s_ovi_e5  = _ema(sect_ovi,   5).values
+    s_ovi_e15 = _ema(sect_ovi,  15).values
+    s_ovi_e600= _ema(sect_ovi, 600).values
     s_oni_600 = _sma(sect_oni, 600).values
     s_oni_30  = _sma(sect_oni,  30).values
 
-    feats['Sect_OBI1']    = sect_obi1
-    feats['E_TI_rel_600'] = ti_600   - s_ti_600
-    feats['Sect_TI_p40']  = s_ti_40  - s_ti_600
-    feats['Sect_OVI_p20'] = s_ovi_20 - s_ovi_600
-    feats['Sect_ONI_p30'] = s_oni_30 - s_oni_600
+    feats['Sect_OBI1']     = sect_obi1
+    feats['E_TI_rel_600']  = ti_600   - s_ti_600
+    feats['Sect_TI_p40']   = s_ti_40  - s_ti_600
+    feats['Sect_OVI_p20']  = s_ovi_20 - s_ovi_600
+    feats['Sect_ONI_p30']  = s_oni_30 - s_oni_600
+    feats['Sect_OVI_ep5']  = s_ovi_e5  - s_ovi_e600
+    feats['Sect_OVI_ep15'] = s_ovi_e15 - s_ovi_e600
 
     # ── 日内时间特征 ─────────────────────────────────────────────────────────────
     # 利用日内 tick 位置作为二值特征，捕捉上午/下午收益率系统性偏移：
@@ -164,26 +180,29 @@ def process_day_data(day_data):
     for s in ('A', 'B', 'C', 'D'):
         sect_ret_arr += (pd.Series(day_data[s]['Return5min'].values)
                          .shift(600).fillna(0.0).values / 4.0)
-    feats['sect_ret_lag'] = np.clip(sect_ret_arr, -0.1, 0.1)
+    feats['sect_ret_lag'] = np.clip(sect_ret_arr, -_RET_CLIP_LONG, _RET_CLIP_LONG)
     feats['e_ret_lag'] = np.clip(
-        pd.Series(e['Return5min'].values).shift(600).fillna(0.0).values, -0.1, 0.1)
+        pd.Series(e['Return5min'].values).shift(600).fillna(0.0).values,
+        -_RET_CLIP_LONG, _RET_CLIP_LONG)
 
     mid = (e['BidPrice1'].values + e['AskPrice1'].values) / 2.0
     mid_s = pd.Series(mid)
-    for lag in (120, 300, 600):
+    for lag in (30, 60, 120, 300, 600):
+        clip = _RET_CLIP_SHORT if lag <= 60 else _RET_CLIP_LONG
         ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).fillna(0.0).values
-        feats[f'past_ret_{lag}'] = np.clip(ret, -0.1, 0.1)
+        feats[f'past_ret_{lag}'] = np.clip(ret, -clip, clip)
 
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
         'TradeImb_p15', 'TradeImb_p30', 'TradeImb_p40', 'TradeImb_p60', 'TradeImb_ep60',
-        'OVI_p15', 'OVI_p30', 'OVI_p60', 'OVI_ep15',
+        'OVI_p15', 'OVI_p30', 'OVI_p60', 'OVI_ep15', 'OVI_ep5',
         'ONI_p15', 'ONI_p30', 'TNI_ep15',
         'Sect_OBI1', 'E_TI_rel_600', 'Sect_TI_p40', 'Sect_OVI_p20', 'Sect_ONI_p30',
+        'Sect_OVI_ep5', 'Sect_OVI_ep15',
         'aft_13800', 'aft_12000',
         'sect_ret_lag', 'e_ret_lag',
-        'past_ret_120', 'past_ret_300', 'past_ret_600',
+        'past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

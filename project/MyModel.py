@@ -1,5 +1,5 @@
 # MyModel.py
-# 在线预测模型：12 个时间感知 Ridge 子模型 + 基于滚动 IC 的动态集成权重
+# 在线预测模型：20 个 Ridge 子模型（12 稳定 + 8 niche）+ 基于滚动 IC 的动态集成权重
 
 from collections import deque
 import os
@@ -106,36 +106,51 @@ _ME8 = [
     'ONI_p15', 'Sect_OBI1', 'Sect_OVI_p20', 'TNI_ep15',
 ]
 _MD16 = _BASE14 + ['Sect_ONI_p30', 'OVI_p30']
-_SR = ['sect_ret_lag', 'e_ret_lag']
-_PR = ['past_ret_120', 'past_ret_300', 'past_ret_600']
+_SR   = ['sect_ret_lag', 'e_ret_lag']
+_PR   = ['past_ret_120', 'past_ret_300', 'past_ret_600']
+_PR2  = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600']
+_OVI5 = ['OVI_ep5', 'Sect_OVI_ep5']
 
+# (feature_list, ridge_alpha, is_niche)
 _MODELS_DEF = {
-    'MA':       (_BASE14,                             150),
-    'MD':       (_MD16,                               150),
-    'MT':       (_BASE14 + ['aft_13800'],             150),
-    'MTC':      (_MC9   + ['aft_13800'],              200),
-    'MTD':      (_MD16  + ['aft_13800'],              150),
-    'MTE':      (_ME8   + ['aft_13800'],               80),
-    'MT12':     (_BASE14 + ['aft_12000'],             150),
-    'MTD12':    (_MD16  + ['aft_12000'],              150),
-    'MTsr12':   (_BASE14 + ['aft_12000'] + _SR,       150),
-    'MTpr12':   (_BASE14 + ['aft_12000'] + _PR,       150),
-    'MTsrpr12': (_BASE14 + ['aft_12000'] + _SR + _PR, 150),
-    'MTDsrpr12':(_MD16  + ['aft_12000'] + _SR + _PR,  150),
+    # ── 稳定模型 (12 个) ────────────────────────────────────────────────────────
+    'MA':        (_BASE14,                              150, False),
+    'MD':        (_MD16,                                150, False),
+    'MT':        (_BASE14 + ['aft_13800'],              150, False),
+    'MTC':       (_MC9   + ['aft_13800'],               200, False),
+    'MTD':       (_MD16  + ['aft_13800'],               150, False),
+    'MTE':       (_ME8   + ['aft_13800'],                80, False),
+    'MT12':      (_BASE14 + ['aft_12000'],              150, False),
+    'MTD12':     (_MD16  + ['aft_12000'],               150, False),
+    'MTsr12':    (_BASE14 + ['aft_12000'] + _SR,        150, False),
+    'MTpr12':    (_BASE14 + ['aft_12000'] + _PR,        150, False),
+    'MTsrpr12':  (_BASE14 + ['aft_12000'] + _SR + _PR,  150, False),
+    'MTDsrpr12': (_MD16  + ['aft_12000'] + _SR + _PR,   150, False),
+    # ── Niche 模型 (8 个)：初始权重 0，预热后由滚动 IC 动态发现价值 ────────────
+    'Nep5':      (_ME8  + ['aft_13800'] + _OVI5,            80, True),
+    'Nep12':     (_ME8  + ['aft_12000'] + _OVI5,            80, True),
+    'NSov12':    (_MD16 + ['aft_12000', 'Sect_OVI_ep5', 'Sect_OVI_ep15'] + _SR, 100, True),
+    'NSovT':     (_BASE14 + ['aft_13800', 'Sect_OVI_ep5', 'Sect_OVI_ep15'],     100, True),
+    'Nag12':     (_MD16 + ['aft_12000'] + _SR + _PR  + _OVI5,    30, True),
+    'NagX':      (_MD16 + ['aft_12000'] + _SR + _PR2 + _OVI5,    20, True),
+    'Npr30':     (_BASE14 + ['aft_12000'] + _SR + _PR2,          150, True),
+    'NprD30':    (_MD16  + ['aft_12000'] + _SR + _PR2,           150, True),
 }
 
 # 动态集成超参数
-_DELAY  = 600    # Return5min 可知延迟（ticks）
-_WINDOW = 900    # 滚动 IC 窗口（ticks）
-_TEMP   = 10.0   # softmax 温度
-_FLOOR  = 0.0    # 权重下限
+_DELAY       = 600    # Return5min 可知延迟（ticks）
+_WINDOW      = 900    # 滚动 IC 窗口（ticks）
+_TEMP        = 12.0   # softmax 温度
+_FLOOR       = 0.0    # 权重下限
+_NICHE_INIT  = 0.0    # niche 模型预热期权重（0 = 完全零权重）
 
 # 日内时间特征阈值
 _T_13800 = 13800
 _T_12000 = 12000
 
-# 滞后收益剪裁范围
-_RET_CLIP = 0.1
+# 收益率剪裁
+_RET_CLIP     = 0.1
+_RET_CLIP_SH  = 0.05   # 短窗口（30/60 tick）收益率剪裁范围
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -146,23 +161,24 @@ class MyModel:
     """
     在线预测模型。
 
-    训练：从 train.csv 训练 12 个 Ridge 子模型（全量数据）。
+    训练：从 train.csv 训练 20 个 Ridge 子模型（全量数据）。
     重置：每个新测试日调用 reset()，清除所有状态。
     预测：online_predict() 每 tick 调用一次，增量更新 EMA/SMA 状态并返回集成预测。
 
     新增特征（无前视偏差）：
-      sect_ret_lag  = 板块(ABCD)过去5分钟平均已实现收益
-      e_ret_lag     = E 过去5分钟已实现收益（≈ past_ret_600 的最后价版本）
-      past_ret_120  = E 中间价过去 1 分钟收益率
-      past_ret_300  = E 中间价过去 2.5 分钟收益率
-      past_ret_600  = E 中间价过去 5 分钟收益率
-    在线计算方法：维护 E 和各板块股票的中间价/最终价 601 元素滑动缓冲区。
+      OVI_ep5        = E OVI EMA5 - EMA600（超短期订单动能）
+      Sect_OVI_ep5   = 板块 OVI EMA5  - EMA600
+      Sect_OVI_ep15  = 板块 OVI EMA15 - EMA600
+      past_ret_30    = E 中间价过去 30 tick 收益率
+      past_ret_60    = E 中间价过去 60 tick 收益率
+    在线计算：维护 E 和各板块的601元素中间价缓冲区。
     """
 
     def __init__(self):
         self._coefs: dict = {}
         self._intercepts: dict = {}
         self._feat_lists: dict = {}
+        self._is_niche: list = []
         self._model_names: list = []
         self._train()
         self.reset()
@@ -180,7 +196,7 @@ class MyModel:
         df = pd.read_csv(csv_path)
         y = df['Return5min'].values
 
-        for name, (feats, alpha) in _MODELS_DEF.items():
+        for name, (feats, alpha, is_niche) in _MODELS_DEF.items():
             X = df[feats].values
             m = Ridge(alpha=alpha)
             m.fit(X, y)
@@ -189,6 +205,7 @@ class MyModel:
             self._feat_lists[name] = feats
 
         self._model_names = list(_MODELS_DEF.keys())
+        self._is_niche    = [v[2] for v in _MODELS_DEF.values()]
 
     # ──────────────────────────────────────────────────────────────────────────
     # 重置（每个新测试日调用一次）
@@ -204,7 +221,7 @@ class MyModel:
 
         # E 股 EMA
         self._ti_ema  = {s: _EMA(s) for s in (60, 600)}
-        self._ovi_ema = {s: _EMA(s) for s in (15, 600)}
+        self._ovi_ema = {s: _EMA(s) for s in (5, 15, 600)}   # 新增 EMA5
         self._tni_ema = {s: _EMA(s) for s in (15, 600)}
 
         # 板块 SMA
@@ -212,8 +229,10 @@ class MyModel:
         self._s_ovi_sma = {w: _SMA(w) for w in (20, 600)}
         self._s_oni_sma = {w: _SMA(w) for w in (30, 600)}
 
-        # 中间价历史缓冲（同时用于 Return5min 延迟计算 和 past_ret 计算）
-        # maxlen = DELAY + 1 = 601，buf[0]=mid(t-600), buf[-1]=mid(t)
+        # 板块 EMA（新增，用于 Sect_OVI_ep5/ep15）
+        self._s_ovi_ema = {s: _EMA(s) for s in (5, 15, 600)}
+
+        # 中间价历史缓冲（601 元素，用于 past_ret 和 Return5min 延迟计算）
         self._mid_buf: deque = deque(maxlen=_DELAY + 1)
 
         # 各板块中间价缓冲（用于 sect_ret_lag 在线计算）
@@ -230,9 +249,13 @@ class MyModel:
             n: _RollingIC(_WINDOW) for n in self._model_names
         }
 
-        # 等权初始化
+        # 预热期权重：稳定模型等权，niche 模型为 _NICHE_INIT
         nm = len(self._model_names)
-        self._weights = np.ones(nm) / nm
+        nf = np.array(self._is_niche, dtype=float)
+        warmup_w = np.where(nf, _NICHE_INIT, 1.0)
+        w_sum = warmup_w.sum()
+        warmup_w = warmup_w / w_sum if w_sum > 1e-12 else np.ones(nm) / nm
+        self._weights = warmup_w.copy()
 
     # ──────────────────────────────────────────────────────────────────────────
     # 在线预测
@@ -272,6 +295,7 @@ class MyModel:
         for sma in self._s_ti_sma.values():  sma.update(s_ti)
         for sma in self._s_ovi_sma.values(): sma.update(s_ovi)
         for sma in self._s_oni_sma.values(): sma.update(s_oni)
+        for ema in self._s_ovi_ema.values(): ema.update(s_ovi)
 
         # ── 4. 更新价格历史缓冲 ───────────────────────────────────────────────
         mid = (float(E_row['BidPrice1']) + float(E_row['AskPrice1'])) / 2.0
@@ -282,11 +306,9 @@ class MyModel:
             self._sect_mid_buf[i].append(s_mid)
 
         # ── 5. 计算滞后收益特征 ───────────────────────────────────────────────
-        # 只有缓冲区填满 601 个元素后才有有效值
         buf_full = len(self._mid_buf) == _DELAY + 1
 
-        # E 股中间价过去 N tick 收益率
-        def _past_ret(buf, lag):
+        def _past_ret(buf, lag, clip=_RET_CLIP):
             if len(buf) < lag + 1:
                 return 0.0
             buf_list = list(buf)
@@ -294,19 +316,21 @@ class MyModel:
             p_past = buf_list[-1 - lag]
             if abs(p_past) < 1e-9:
                 return 0.0
-            return float(np.clip((p_now - p_past) / p_past, -_RET_CLIP, _RET_CLIP))
+            return float(np.clip((p_now - p_past) / p_past, -clip, clip))
 
         past_ret_600 = _past_ret(self._mid_buf, 600)
         past_ret_300 = _past_ret(self._mid_buf, 300)
         past_ret_120 = _past_ret(self._mid_buf, 120)
+        past_ret_60  = _past_ret(self._mid_buf,  60, _RET_CLIP_SH)
+        past_ret_30  = _past_ret(self._mid_buf,  30, _RET_CLIP_SH)
 
-        # sect_ret_lag: 板块平均过去5分钟收益（用各板块中间价缓冲计算）
+        # sect_ret_lag: 板块平均过去5分钟收益
         sect_ret_lag = 0.0
         for sbuf in self._sect_mid_buf:
             sect_ret_lag += _past_ret(sbuf, 600) / 4.0
         sect_ret_lag = float(np.clip(sect_ret_lag, -_RET_CLIP, _RET_CLIP))
 
-        # e_ret_lag: E 股过去5分钟已实现收益（≈ past_ret_600，用于与训练一致）
+        # e_ret_lag: E 股过去5分钟已实现收益
         e_ret_lag = float(np.clip(past_ret_600, -_RET_CLIP, _RET_CLIP))
 
         # ── 6. 组装特征字典 ───────────────────────────────────────────────────
@@ -316,35 +340,41 @@ class MyModel:
         sti600 = self._s_ti_sma[600].value()
         sov600 = self._s_ovi_sma[600].value()
         son600 = self._s_oni_sma[600].value()
+        s_ovi_e600 = self._s_ovi_ema[600].value()
 
         fv = {
-            'TotalBidVol':   tbv,
-            'TradeImb_600':  t600,
-            'TradeImb_diff': e_ti - t600,
-            'TradeImb_p15':  self._ti_sma[15].value()  - t600,
-            'TradeImb_p30':  self._ti_sma[30].value()  - t600,
-            'TradeImb_p40':  self._ti_sma[40].value()  - t600,
-            'TradeImb_p60':  self._ti_sma[60].value()  - t600,
-            'TradeImb_ep60': self._ti_ema[60].value()  - self._ti_ema[600].value(),
-            'OVI_p15':       self._ovi_sma[15].value() - ov600,
-            'OVI_p30':       self._ovi_sma[30].value() - ov600,
-            'OVI_p60':       self._ovi_sma[60].value() - ov600,
-            'OVI_ep15':      self._ovi_ema[15].value() - self._ovi_ema[600].value(),
-            'ONI_p15':       self._oni_sma[15].value() - on600,
-            'ONI_p30':       self._oni_sma[30].value() - on600,
-            'TNI_ep15':      self._tni_ema[15].value() - self._tni_ema[600].value(),
-            'Sect_OBI1':     s_obi1,
-            'E_TI_rel_600':  t600 - sti600,
-            'Sect_TI_p40':   self._s_ti_sma[40].value()  - sti600,
-            'Sect_OVI_p20':  self._s_ovi_sma[20].value() - sov600,
-            'Sect_ONI_p30':  self._s_oni_sma[30].value() - son600,
-            'aft_13800':     1.0 if t > _T_13800 else 0.0,
-            'aft_12000':     1.0 if t > _T_12000 else 0.0,
-            'sect_ret_lag':  sect_ret_lag,
-            'e_ret_lag':     e_ret_lag,
-            'past_ret_120':  past_ret_120,
-            'past_ret_300':  past_ret_300,
-            'past_ret_600':  past_ret_600,
+            'TotalBidVol':    tbv,
+            'TradeImb_600':   t600,
+            'TradeImb_diff':  e_ti - t600,
+            'TradeImb_p15':   self._ti_sma[15].value()  - t600,
+            'TradeImb_p30':   self._ti_sma[30].value()  - t600,
+            'TradeImb_p40':   self._ti_sma[40].value()  - t600,
+            'TradeImb_p60':   self._ti_sma[60].value()  - t600,
+            'TradeImb_ep60':  self._ti_ema[60].value()  - self._ti_ema[600].value(),
+            'OVI_p15':        self._ovi_sma[15].value() - ov600,
+            'OVI_p30':        self._ovi_sma[30].value() - ov600,
+            'OVI_p60':        self._ovi_sma[60].value() - ov600,
+            'OVI_ep15':       self._ovi_ema[15].value() - self._ovi_ema[600].value(),
+            'OVI_ep5':        self._ovi_ema[5].value()  - self._ovi_ema[600].value(),
+            'ONI_p15':        self._oni_sma[15].value() - on600,
+            'ONI_p30':        self._oni_sma[30].value() - on600,
+            'TNI_ep15':       self._tni_ema[15].value() - self._tni_ema[600].value(),
+            'Sect_OBI1':      s_obi1,
+            'E_TI_rel_600':   t600 - sti600,
+            'Sect_TI_p40':    self._s_ti_sma[40].value()  - sti600,
+            'Sect_OVI_p20':   self._s_ovi_sma[20].value() - sov600,
+            'Sect_ONI_p30':   self._s_oni_sma[30].value() - son600,
+            'Sect_OVI_ep5':   self._s_ovi_ema[5].value()  - s_ovi_e600,
+            'Sect_OVI_ep15':  self._s_ovi_ema[15].value() - s_ovi_e600,
+            'aft_13800':      1.0 if t > _T_13800 else 0.0,
+            'aft_12000':      1.0 if t > _T_12000 else 0.0,
+            'sect_ret_lag':   sect_ret_lag,
+            'e_ret_lag':      e_ret_lag,
+            'past_ret_30':    past_ret_30,
+            'past_ret_60':    past_ret_60,
+            'past_ret_120':   past_ret_120,
+            'past_ret_300':   past_ret_300,
+            'past_ret_600':   past_ret_600,
         }
 
         # ── 7. 各子模型预测 ───────────────────────────────────────────────────
@@ -369,8 +399,8 @@ class MyModel:
         for name in self._model_names:
             self._pred_buf[name].append(model_preds[name])
 
-        # ── 9. 更新集成权重 ───────────────────────────────────────────────────
-        warmup = _DELAY + _WINDOW // 4   # 825 tick 预热期使用等权
+        # ── 9. 更新集成权重（预热期结束后由滚动 IC 驱动）─────────────────────
+        warmup = _DELAY + _WINDOW // 4   # 825 tick 预热期
         if t >= warmup:
             ic_arr = np.array([self._ric[n].value() for n in self._model_names])
             exp_ic = np.exp(np.clip(ic_arr * _TEMP, -10.0, 10.0))
@@ -384,3 +414,4 @@ class MyModel:
         self._tick += 1
         return float(sum(self._weights[i] * model_preds[n]
                          for i, n in enumerate(self._model_names)))
+
