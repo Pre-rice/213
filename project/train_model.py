@@ -7,28 +7,24 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：33 个 Ridge 子模型（12 稳定 + 21 niche）+ 保守化自适应权重
+# 动态集成架构：36 个 Ridge 子模型（12 稳定 + 24 niche）+ 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（21 个，Iter13 新增 2 个）：
-#   31-model基础上新增 N_oni9_ME2 和 N_oni9_T（使用 ONI_ep15 + past_ret_900）
-#   ONI_ep15: EMA委托笔数失衡（Day1 IC=+0.20，与SMA ONI互补的动态视角）
-#   past_ret_900: 7.5分钟价格收益率（Day5 IC=+0.26，Day3=+0.20，Day1=+0.17）
+# Niche 模型（24 个，Iter14 新增 3 个）：
+#   Iter13基础上新增 N_bp_IXN3, N_rxti_T, N_bp_deep_T（book_pres_pulse + ret_x_ti600）
+#   book_pres_pulse: 全5档委托失衡脉冲（与obi_deep_p15互补，均值IC≈0.079）
+#   ret_x_ti600: past_ret_600×TradeImb_600（动量方向双重确认交互，Day1 IC=+0.187）
 #
-# Iter13 优化（内层4折IC为目标，嵌套交叉验证参数搜索）：
-#   集成参数（网格搜索 5×4 嵌套CV，300+ 组合）：
-#     WINDOW: 900→600（更快适应当日IC结构）
-#     TEMP: 12→15（更积极集中权重到强IC模型）
-#     EWMA_BETA: 0.02→0.01（IC估计更稳定，与高频更新互补）
-#     UPDATE_FREQ: 30→15（更频繁更新，与稳定IC估计配合）
-#   效果（嵌套盲测验证）：
-#     内层4折IC: 0.2891→0.2911（+0.002）
-#     外层IC: 0.3003→0.3043（+0.004）
-#     Day1: 0.243→0.252(+0.009), Day5: 0.279→0.294(+0.015)（硬日显著改善）
-#     Day2/3: 基本持平，Day4: 轻微下降(-0.009)
+# Iter14 优化（时间段IC分析 + inner 4-fold IC验证）：
+#   时间段分析发现：AM-1(3k-6k)最弱（mean=0.127），PM-3(21k-24k)最强（0.401）
+#   新信号 book_pres_pulse 和 ret_x_ti600 在内层4折IC中与 IXN3 结合最有效：
+#     inner 4-fold IC: 0.2924→0.2938（+0.0014）
+#     5-fold CV IC: 0.3055→0.3076（+0.002）
+#     ICIR: 7.33→7.37（最高 ICIR）
+#     Day1: 0.252→0.259(+0.007), Day2: 0.370→0.376(+0.006), Day5: 0.295→0.300(+0.005)
 #
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -94,6 +90,12 @@ _LAG2 = ['e_ret_lag2']
 _IXN1 = ['ovi_x_abs_ret', 'tbv_x_ovi']
 _IXN3 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum']
 _IXN4 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi']
+
+# 新增（Iter14）：全档书压脉冲 + 价格×成交流量方向确认交互
+# _BP: book_pres_pulse = 全5档委托失衡 SMA15-SMA600 脉冲（与 obi_deep_p15 互补）
+# _RXTI: ret_x_ti600 = past_ret_600 × TradeImb_600（动量方向双重确认交互）
+_BP   = ['book_pres_pulse']
+_RXTI = ['ret_x_ti600']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -168,6 +170,20 @@ MODELS = {
     # N_oni9_T:    ME9 + SR + PR3 + LOT + CUM2（无时间特征，Day5 最优配置）
     #   → 与 N_cum_ME_T 类似但加入 ONI_ep15 和 past_ret_900
     'N_oni9_T':       (_ME9 + _OVI5 + _SR + _PR3 + _LOT + _CUM2, 20, True),
+    # ── 新增 Niche 模型（Iter14，时间段分析指导 + 新信号验证）─────────────────────
+    # 背景：时间段IC分析发现AM-1(3k-6k)最弱(mean=0.127)，开盘段(0-3k)和PM-3最强。
+    # 新信号 book_pres_pulse（全档书压）和 ret_x_ti600（动量确认）在内层4折IC中
+    # 与 IXN3 结合最有效，共同提升 inner IC +0.0014，5折CV IC +0.002，ICIR +0.04。
+    #
+    # N_bp_IXN3: book_pres_pulse（全档书压）+ IXN3 无时间特征模型
+    #   → Day1 IC=+0.254(+0.002), Day2=+0.372(+0.001), Day5=+0.297(+0.002)
+    'N_bp_IXN3':      (_ME8 + _BP + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_rxti_T: ret_x_ti600（价格×成交流量方向确认）+ IXN3 无时间特征模型
+    #   → Day4 outer IC 提升 +0.0017（N_rxti 单独贡献），全日均值 +0.001
+    'N_rxti_T':       (_ME8 + _RXTI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_bp_deep_T: book_pres_pulse + obi_deep_p15（全档+深档双层书压，互补组合）
+    #   → 与 N_bp_IXN3/N_rxti_T 配合，三模型组合给出最高 ICIR=7.37（基线7.33）
+    'N_bp_deep_T':    (_ME8 + _BP + _DEEP + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())

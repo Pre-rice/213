@@ -148,7 +148,7 @@ class _RollingIC:
 class MyModel:
     """
     在线预测模型。
-    init 中训练全部 33 个 Ridge 子模型（在 train.csv 全量数据上）。
+    init 中训练全部 36 个 Ridge 子模型（在 train.csv 全量数据上）。
     online_predict 接受逐 tick 数据，返回该 tick 的 Return5min 预测值。
     """
 
@@ -226,6 +226,9 @@ class MyModel:
         self._scum_buy  = 0.0;  self._scum_sell = 0.0
         self._scum_s600 = _RunSMA(600)
 
+        # ── 全档书压（Iter14: book_pres_pulse）────────────────────────────────
+        self._bp_s15    = _RunSMA(15);   self._bp_s600   = _RunSMA(600)
+
         # ── 价格 lag 缓冲区（E 中间价）────────────────────────────────────────
         # 保存最近 901 个 tick 的中间价
         self._mid_buf  = deque(maxlen=901)
@@ -296,6 +299,10 @@ class MyModel:
         bid_deep = sum(float(e[f'BidVolume{i}']) for i in range(2, 6))
         ask_deep = sum(float(e[f'AskVolume{i}']) for i in range(2, 6))
         obi_deep_val = _imb(bid_deep, ask_deep)
+
+        # 全档书压（Iter14: book_pres_pulse = SMA15 - SMA600 of all-5-level book imbalance）
+        ask_all = sum(float(e[f'AskVolume{i}']) for i in range(1, 6))
+        book_pres_val = _imb(tbv, ask_all)
 
         buy_num_e   = max(float(e['TradeBuyNum']),  1.0)
         sell_num_e  = max(float(e['TradeSellNum']), 1.0)
@@ -376,6 +383,10 @@ class MyModel:
 
         deep15   = self._deep_s15.update(obi_deep_val)
         deep600  = self._deep_s600.update(obi_deep_val)
+
+        # 全档书压 SMA (Iter14)
+        bp15  = self._bp_s15.update(book_pres_val)
+        bp600 = self._bp_s600.update(book_pres_val)
 
         # 累计成交量失衡
         self._cum_buy  += float(e['TradeBuyVolume'])
@@ -492,6 +503,9 @@ class MyModel:
             'ret_x_cum':          float(np.clip(pr600 * float(np.clip(cum_raw - cum_base, -0.5, 0.5))
                                                 * 20, -0.5, 0.5)),
             'oni_x_ovi':          float(np.clip((oni15 - oni600) * ovi_p15 * 5, -0.5, 0.5)),
+            # Iter14 新增
+            'book_pres_pulse':    float(np.clip(bp15 - bp600, -0.5, 0.5)),
+            'ret_x_ti600':        float(np.clip(pr600 * ti600 * 20, -0.5, 0.5)),
         }
 
         # NaN/Inf 清洗

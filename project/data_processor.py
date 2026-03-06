@@ -112,6 +112,13 @@ def process_day_data(day_data):
                                 Day4 IC=+0.25，捕捉"流量积累方向与近期价格反转"的双重确认
      47.  oni_x_ovi           - ONI_p15 × OVI_p15（委托笔数 × 委托量双重失衡共振）
                                 当订单数量与资金量方向一致时信号更强（全 5 日一致正向）
+
+    ── Iter14 新增（时间段分析指导）──────────────────────────────────────────────
+     48.  book_pres_pulse     - E 股全 5 档委托失衡 SMA15 - SMA600 脉冲
+                                与 obi_deep_p15（2-5档）互补（含1档即时深度），
+                                全 5 日 IC 一致正向（0.051-0.116），均值约 0.079
+     49.  ret_x_ti600         - past_ret_600 × TradeImb_600（价格方向 × 成交流量方向确认）
+                                Day1 IC=+0.187, Day2=+0.118，均值约 0.097；与 ovi_x_abs_ret 互补
     """
     e = day_data['E']
 
@@ -405,6 +412,26 @@ def process_day_data(day_data):
     oni_pulse = feats['ONI_p15']
     feats['oni_x_ovi'] = np.clip(oni_pulse * ovi_pulse * 5, -0.5, 0.5)
 
+    # ── 新增（Iter14）──────────────────────────────────────────────────────────
+
+    # book_pres_pulse: E 股全 5 档委托买卖失衡 SMA15 - SMA600 脉冲
+    # 与 obi_deep_p15（2-5 档）互补：本信号包含 1 档（即时深度），捕捉更宽的市场深度方向
+    # 实证：全 5 日 IC 一致为正（0.051-0.116），均值约 0.079，
+    #       与 obi_deep_p15（相关性约 0.6）互补，合并使用能提升 Day1/3/5 预测
+    bid_vol_all = np.sum([e[f'BidVolume{i}'].values for i in range(1, 6)], axis=0)
+    ask_vol_all = np.sum([e[f'AskVolume{i}'].values for i in range(1, 6)], axis=0)
+    book_pres = _imb(bid_vol_all, ask_vol_all)
+    feats['book_pres_pulse'] = np.clip(
+        _sma(book_pres, 15).values - _sma(book_pres, 600).values,
+        -0.5, 0.5)
+
+    # ret_x_ti600: 近期价格方向 × 长期成交失衡（动量确认交互）
+    # 理念：当 5 分钟价格走势与长期成交量失衡方向一致时，信号更可靠
+    #       与 ovi_x_abs_ret 互补：本信号用有符号价格收益而非绝对值，
+    #       捕捉"方向双重确认"（价格 + 成交流量）而非"幅度条件化"
+    # 实证：Day1 IC=+0.187, Day2=+0.118，全 5 日均值约 0.097（Day3/4 略负但小）
+    feats['ret_x_ti600'] = np.clip(pr600 * feats['TradeImb_600'] * 20, -0.5, 0.5)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -426,6 +453,8 @@ def process_day_data(day_data):
         'cum_flow_imb', 'sect_cum_flow_imb', 'e_ret_lag2',
         # 新增：交互特征（非线性信号增强）
         'ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi',
+        # 新增（Iter14）：全档书压脉冲 + 价格×成交流量方向确认交互
+        'book_pres_pulse', 'ret_x_ti600',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})
