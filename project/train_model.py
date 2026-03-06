@@ -7,13 +7,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：27 个 Ridge 子模型（12 稳定 + 15 niche）+ 基于滚动 IC 的自适应权重
+# 动态集成架构：29 个 Ridge 子模型（12 稳定 + 17 niche）+ 基于滚动 IC 的自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（15 个）：整体不稳定但某些时段/机制下表现突出
+# Niche 模型（17 个）：整体不稳定但某些时段/机制下表现突出
 #   预热期权重为 0（NICHE_INIT_WEIGHT=0.0），由滚动 IC 机制发现其优势窗口
 #   Nep5/Nep12   — 超短期 OVI EMA5 脉冲（瞬时订单动能）
 #   NSov12/NSovT — 板块 OVI 超短期 EMA（板块流动性领先信号）
@@ -22,6 +22,8 @@ warnings.filterwarnings('ignore')
 #   Nsmr12/NsmrD12/NsmrX — 板块短期价格收益率 + 横截面相对表现
 #   Nlot12/NlotD12 — 大单成交失衡（lot_imb_15：单笔成交金额方向）
 #   NpOVI/NpOVI_S — OVI纯净+CSM+大单（剔除弱信号日噪声 TI 特征）
+#   NpOVI_T       — NpOVI 的无时间特征版（剔除 aft_12000，泛化弱信号日日内模式）
+#   NpOVI_TD      — NpOVI_T + 深层委托簿失衡脉冲（obi_deep_p15：2-5 档方向信息）
 #
 # 动态集成逻辑：
 #   Return5min(t) 在 t+600 可知，因此在 tick t 可用 [t-DELAY-WINDOW, t-DELAY]
@@ -65,6 +67,9 @@ _SP = ['e_spread_pulse']
 
 # 新增：大单成交失衡（方向一致信号，弱信号日尤强）
 _LOT = ['lot_imb_15', 'sect_lot_imb_15']
+
+# 新增：深层委托簿失衡脉冲（2-5 档，与 OVI 1 档正交）
+_DEEP = ['obi_deep_p15']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -112,6 +117,16 @@ MODELS = {
     # NpOVI 系列模型完全剔除 TI 特征，专注于这三类互补信号。
     'NpOVI':    (_ME8 + _OVI5 + ['aft_12000'] + _SR + _PR2 + ['csm_ret_120'] + _LOT, 20, True),
     'NpOVI_S':  (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['csm_ret_120'] + _LOT,       100, True),
+    # ── 无时间特征 OVI 纯净 Niche 模型（2 个）─────────────────────────────────────
+    # 发现：aft_12000 特征在弱信号日（1/5）会将训练集（日 2/3/4）学到的日内模式
+    # 错误迁移到测试日，导致 OVI 模型在 PM 时段的预测偏差。
+    # 剔除 aft_12000 后模型"时间无感知"，避免日内模式的跨日迁移误差，
+    # 在 Day1/5 上提升约 +0.008 IC，ICIR 从 6.67 提升至 7.03。
+    # NpOVI_T:  完全去掉时间特征，保留全套 OVI+CSM+大单+价格反转 特征。
+    # NpOVI_TD: NpOVI_T 基础上叠加 obi_deep_p15（深层订单簿方向，与 OVI 正交），
+    #           进一步强化对弱信号日深度委托方向的捕捉。
+    'NpOVI_T':  (_ME8 + _OVI5 + _SR + _PR2 + ['csm_ret_120'] + _LOT,           20, True),
+    'NpOVI_TD': (_ME8 + _OVI5 + _SR + _PR2 + ['csm_ret_120'] + _LOT + _DEEP,   20, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
