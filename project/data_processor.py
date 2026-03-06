@@ -211,24 +211,41 @@ def process_day_data(day_data):
     # 核心思路：Return5min(t) 在 t+600 时可知，因此 Return5min(t-600) 在 t 时
     # 已完全已知，无任何前视偏差。这些滞后收益携带市场动量/反转信息。
     #
+    # 冷启动处理（参考 suggestion.md §2.1）：
+    #   日初前 lag 个 tick 无历史可知，使用当日"有效收益"的均值填充（而非 0）。
+    #   0 具有强先验意义（"无收益"），会在冷启动期产生可学习但不泛化的假信号。
+    #   使用当日均值（t>=lag 后的均值）能更中性地表示"信息不足"状态。
+    #   注：在线预测时同样应使用运行均值（每日观测到的均值）填充冷启动期。
+    #
     # sect_ret_lag: 板块(ABCD)过去5分钟平均已实现收益（各股取平均）
     # e_ret_lag:    E股自身过去5分钟已实现收益（均值回复信号）
     # past_ret_120/300/600: E股中间价在过去 1/2.5/5 分钟内的收益率
+
+    def _fillna_daymean(arr):
+        """用有效值（非NaN）的均值替代NaN，避免用0填充冷启动期"""
+        s = pd.Series(arr)
+        valid_mean = s.dropna().mean()
+        if np.isnan(valid_mean):
+            valid_mean = 0.0
+        return s.fillna(valid_mean).values
+
     sect_ret_arr = np.zeros(len(e))
     for s in ('A', 'B', 'C', 'D'):
-        sect_ret_arr += (pd.Series(day_data[s]['Return5min'].values)
-                         .shift(600).fillna(0.0).values / 4.0)
+        sect_ret_arr += (_fillna_daymean(
+            pd.Series(day_data[s]['Return5min'].values).shift(600).values
+        ) / 4.0)
     feats['sect_ret_lag'] = np.clip(sect_ret_arr, -_RET_CLIP_LONG, _RET_CLIP_LONG)
     feats['e_ret_lag'] = np.clip(
-        pd.Series(e['Return5min'].values).shift(600).fillna(0.0).values,
+        _fillna_daymean(pd.Series(e['Return5min'].values).shift(600).values),
         -_RET_CLIP_LONG, _RET_CLIP_LONG)
 
     mid = (e['BidPrice1'].values + e['AskPrice1'].values) / 2.0
     mid_s = pd.Series(mid)
     for lag in (30, 60, 120, 300, 600):
         clip = _RET_CLIP_SHORT if lag <= 60 else _RET_CLIP_LONG
-        ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).fillna(0.0).values
-        feats[f'past_ret_{lag}'] = np.clip(ret, -clip, clip)
+        ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).values
+        ret = np.clip(_fillna_daymean(ret), -clip, clip)
+        feats[f'past_ret_{lag}'] = ret
 
     # ── 板块短期价格收益率 & 跨截面相对收益（新增）─────────────────────────────
     # 现有板块特征（Sect_TI_p40, Sect_OVI_p20 等）均基于订单流失衡，
@@ -241,8 +258,8 @@ def process_day_data(day_data):
     sect_mid_s = pd.Series(sect_mid)
     for lag, clip in ((30, _RET_CLIP_SHORT), (120, _RET_CLIP_LONG)):
         s_ret = (sect_mid_s - sect_mid_s.shift(lag)).divide(
-            sect_mid_s.shift(lag) + 1e-9).fillna(0.0).values
-        feats[f'sect_mid_ret_{lag}'] = np.clip(s_ret, -clip, clip)
+            sect_mid_s.shift(lag) + 1e-9).values
+        feats[f'sect_mid_ret_{lag}'] = np.clip(_fillna_daymean(s_ret), -clip, clip)
 
     # csm_ret_120: 板块 1 分钟收益 – E 自身 1 分钟收益
     # 若 > 0：板块领先 E，E 可能追涨（动能跟随）或均值回复（反转）
@@ -338,7 +355,7 @@ def process_day_data(day_data):
     # 提供比 e_ret_lag（600-tick）更长时间轴的反转信号：
     # Day5 IC=-0.25（偏相关 -0.18），Day2/3 IC=-0.18。
     feats['e_ret_lag2'] = np.clip(
-        pd.Series(e['Return5min'].values).shift(900).fillna(0.0).values,
+        _fillna_daymean(pd.Series(e['Return5min'].values).shift(900).values),
         -_RET_CLIP_LONG, _RET_CLIP_LONG)
 
     # ── 交互特征（新增）─────────────────────────────────────────────────────────
