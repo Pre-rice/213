@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 39 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 42 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -88,6 +88,15 @@ def process_day_data(day_data):
      39.  obi_deep_p15        - E 股 2-5 档委托失衡 SMA15 - SMA600 脉冲
                                 与 OVI（1 档）正交（相关性 0.23-0.26），捕捉深层买卖双方
                                 "耐心资金"的相对强弱，在弱信号日（1/5）有额外正向贡献。
+
+    ── 累计成交流量失衡（新增）──────────────────────────────────────────────────
+     40.  cum_flow_imb        - E 股日内累计买卖成交量失衡，对 600-tick 均值去趋势
+                                (cum_buy - cum_sell) / cum_total - SMA600 偏差
+                                在 Day5 有 IC=+0.23（TI 偏相关 IC=+0.24），捕捉日内趋势方向。
+     41.  sect_cum_flow_imb   - 板块(ABCD)平均累计成交量失衡去趋势
+                                与 cum_flow_imb 正交（Day3 IC=+0.26，Day5 偏相关 IC=+0.14）
+     42.  e_ret_lag2          - E 股 Return5min 900-tick 滞后（7.5 分钟前已实现收益，无前视）
+                                Day5 IC=-0.25（偏相关 -0.18），Day2/3 IC=-0.18/-0.18
     """
     e = day_data['E']
 
@@ -288,6 +297,38 @@ def process_day_data(day_data):
     obi_deep_600 = _sma(obi_deep, 600).values
     feats['obi_deep_p15'] = obi_deep_15 - obi_deep_600
 
+    # ── 累计成交流量失衡（新增）──────────────────────────────────────────────────
+    # cum_flow_imb: (日内累计买量 - 累计卖量) / 累计总量 的 600-tick 去趋势版本
+    # 与短期成交失衡（TI 系列）正交：TI 关注最近窗口的方向，
+    # cum_flow_imb 关注"全天截至目前"的方向积累（类似 VPIN/order flow inventory），
+    # 在 Day4/5（低波动、趋势日）尤为有效（偏相关 IC > 0.17）。
+    cum_buy  = pd.Series(e['TradeBuyVolume'].values).cumsum().values
+    cum_sell = pd.Series(e['TradeSellVolume'].values).cumsum().values
+    cum_total = cum_buy + cum_sell + 1e-6
+    cum_flow_raw = (cum_buy - cum_sell) / cum_total
+    cum_flow_base = _sma(cum_flow_raw, 600).values
+    feats['cum_flow_imb'] = np.clip(cum_flow_raw - cum_flow_base, -0.5, 0.5)
+
+    # sect_cum_flow_imb: 板块(ABCD)累计成交量失衡去趋势均值
+    # 与 E 自身 cum_flow_imb 正交（相关 < 0.4），Day3 IC=+0.26，Day5 偏相关 IC=+0.14。
+    sect_cfb = np.zeros(len(e))
+    sect_cfs = np.zeros(len(e))
+    for s in ('A', 'B', 'C', 'D'):
+        ds = day_data[s]
+        sect_cfb += pd.Series(ds['TradeBuyVolume'].values).cumsum().values / 4.0
+        sect_cfs += pd.Series(ds['TradeSellVolume'].values).cumsum().values / 4.0
+    sect_cum_raw  = (sect_cfb - sect_cfs) / (sect_cfb + sect_cfs + 1e-6)
+    sect_cum_base = _sma(sect_cum_raw, 600).values
+    feats['sect_cum_flow_imb'] = np.clip(sect_cum_raw - sect_cum_base, -0.5, 0.5)
+
+    # e_ret_lag2: E 股 Return5min 900-tick 滞后
+    # 在 t 时刻完全已知（900-tick 前发生，600-tick 前即可读取）。
+    # 提供比 e_ret_lag（600-tick）更长时间轴的反转信号：
+    # Day5 IC=-0.25（偏相关 -0.18），Day2/3 IC=-0.18。
+    feats['e_ret_lag2'] = np.clip(
+        pd.Series(e['Return5min'].values).shift(900).fillna(0.0).values,
+        -_RET_CLIP_LONG, _RET_CLIP_LONG)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -304,6 +345,8 @@ def process_day_data(day_data):
         'lot_imb_15', 'sect_lot_imb_15',
         # 新增：深层委托簿失衡脉冲（2-5 档）
         'obi_deep_p15',
+        # 新增：累计成交流量失衡 + 900-tick 滞后收益
+        'cum_flow_imb', 'sect_cum_flow_imb', 'e_ret_lag2',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

@@ -7,13 +7,13 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：29 个 Ridge 子模型（12 稳定 + 17 niche）+ 基于滚动 IC 的自适应权重
+# 动态集成架构：36 个 Ridge 子模型（12 稳定 + 24 niche）+ 基于滚动 IC 的自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（17 个）：整体不稳定但某些时段/机制下表现突出
+# Niche 模型（24 个）：整体不稳定但某些时段/机制下表现突出
 #   预热期权重为 0（NICHE_INIT_WEIGHT=0.0），由滚动 IC 机制发现其优势窗口
 #   Nep5/Nep12   — 超短期 OVI EMA5 脉冲（瞬时订单动能）
 #   NSov12/NSovT — 板块 OVI 超短期 EMA（板块流动性领先信号）
@@ -24,6 +24,8 @@ warnings.filterwarnings('ignore')
 #   NpOVI/NpOVI_S — OVI纯净+CSM+大单（剔除弱信号日噪声 TI 特征）
 #   NpOVI_T       — NpOVI 的无时间特征版（剔除 aft_12000，泛化弱信号日日内模式）
 #   NpOVI_TD      — NpOVI_T + 深层委托簿失衡脉冲（obi_deep_p15：2-5 档方向信息）
+#   N_cum_ME2/N_cum_ME2_S/N_cum_ME2_SD — 累计成交流量失衡（aft_12000+lag2）
+#   N_cum_ME_T/N_both_ME_T/N_both_ME_T_S/N_both_ME_T_SD — 无时间特征累计流量模型
 #
 # 动态集成逻辑：
 #   Return5min(t) 在 t+600 可知，因此在 tick t 可用 [t-DELAY-WINDOW, t-DELAY]
@@ -70,6 +72,15 @@ _LOT = ['lot_imb_15', 'sect_lot_imb_15']
 
 # 新增：深层委托簿失衡脉冲（2-5 档，与 OVI 1 档正交）
 _DEEP = ['obi_deep_p15']
+
+# 新增：累计成交流量失衡（去趋势）+ 900-tick 滞后收益
+# cum_flow_imb:      E 股日内累计买卖量失衡 SMA600 去趋势（Day4 IC=+0.19, Day5 IC=+0.23）
+# sect_cum_flow_imb: 板块平均累计买卖量失衡去趋势（与 E 正交，Day3 IC=+0.26）
+# e_ret_lag2:        E 股 900-tick 滞后收益（Day5 偏相关 IC=-0.18）
+_CUM  = ['cum_flow_imb']
+_SCUM = ['sect_cum_flow_imb']
+_CUM2 = ['cum_flow_imb', 'sect_cum_flow_imb']
+_LAG2 = ['e_ret_lag2']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -127,6 +138,20 @@ MODELS = {
     #           进一步强化对弱信号日深度委托方向的捕捉。
     'NpOVI_T':  (_ME8 + _OVI5 + _SR + _PR2 + ['csm_ret_120'] + _LOT,           20, True),
     'NpOVI_TD': (_ME8 + _OVI5 + _SR + _PR2 + ['csm_ret_120'] + _LOT + _DEEP,   20, True),
+    # ── 累计成交流量失衡 Niche 模型（7 个）────────────────────────────────────────
+    # 核心发现：cum_flow_imb（日内累计流量去趋势）在 Day5 偏相关 IC=+0.24（TI 控制后），
+    # Day4 偏相关 IC=+0.17，是真正正交于现有 TI/OVI 特征的新信息源。
+    # 七个模型形成"有时间/无时间 × 单流量/双流量 × 有无SMR/DEEP"的系统性覆盖：
+    #
+    # 有时间特征（aft_12000）系列：学习日内时段模式 + 流量累积
+    'N_cum_ME2':      (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM, 20, True),
+    'N_cum_ME2_S':    (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _SMR, 20, True),
+    'N_cum_ME2_SD':   (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _SMR + _DEEP, 20, True),
+    # 无时间特征系列：时间无感知，避免日内模式的跨日迁移误差，在 Day1/5 更好泛化
+    'N_cum_ME_T':     (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM, 20, True),
+    'N_both_ME_T':    (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 20, True),
+    'N_both_ME_T_S':  (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _SMR, 20, True),
+    'N_both_ME_T_SD': (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _SMR + _DEEP, 20, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
