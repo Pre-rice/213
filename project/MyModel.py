@@ -1,5 +1,6 @@
 # MyModel.py
-# 在线预测模型：20 个 Ridge 子模型（12 稳定 + 8 niche）+ 基于滚动 IC 的动态集成权重
+# 在线预测模型：31 个 Ridge 子模型（12 稳定 + 8 niche + 3 AM时段 + 2 OBI + 3 VWAP + 3 交叉项）
+# + 基于滚动 IC 的动态集成权重
 
 from collections import deque
 import os
@@ -111,30 +112,58 @@ _PR   = ['past_ret_120', 'past_ret_300', 'past_ret_600']
 _PR2  = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600']
 _OVI5 = ['OVI_ep5', 'Sect_OVI_ep5']
 
-# (feature_list, ridge_alpha, is_niche)
+# 新增：委托深度失衡特征 (OBI) + TradeImb EMA15 脉冲
+_OBI_NEW = ['OBI1_p15', 'OBI1_ep15', 'OBI_total_p15', 'TradeImb_ep15']
+
+# 新增：日内 VWAP 偏差（均值回复信号）
+_VWAP = ['vwap_dev']
+
+# 新增：信号一致性交叉特征（OVI×TI 乘积项）
+_INTER = ['ovi_ti_short', 'ovi_ti_medium', 'sect_ovi_ti', 'obi_ovi_s']
+
+# 上午/下午时段分割阈值（与 data_processor.py / train_model.py 保持一致）
+_AM_SPLIT = 13800
+
+# (feature_list, ridge_alpha, is_niche, segment)
+# segment: 'ALL'=全量训练, 'AM'=仅上午训练, 'PM'=仅下午训练
 _MODELS_DEF = {
     # ── 稳定模型 (12 个) ────────────────────────────────────────────────────────
-    'MA':        (_BASE14,                              150, False),
-    'MD':        (_MD16,                                150, False),
-    'MT':        (_BASE14 + ['aft_13800'],              150, False),
-    'MTC':       (_MC9   + ['aft_13800'],               200, False),
-    'MTD':       (_MD16  + ['aft_13800'],               150, False),
-    'MTE':       (_ME8   + ['aft_13800'],                80, False),
-    'MT12':      (_BASE14 + ['aft_12000'],              150, False),
-    'MTD12':     (_MD16  + ['aft_12000'],               150, False),
-    'MTsr12':    (_BASE14 + ['aft_12000'] + _SR,        150, False),
-    'MTpr12':    (_BASE14 + ['aft_12000'] + _PR,        150, False),
-    'MTsrpr12':  (_BASE14 + ['aft_12000'] + _SR + _PR,  150, False),
-    'MTDsrpr12': (_MD16  + ['aft_12000'] + _SR + _PR,   150, False),
+    'MA':        (_BASE14,                              150, False, 'ALL'),
+    'MD':        (_MD16,                                150, False, 'ALL'),
+    'MT':        (_BASE14 + ['aft_13800'],              150, False, 'ALL'),
+    'MTC':       (_MC9   + ['aft_13800'],               200, False, 'ALL'),
+    'MTD':       (_MD16  + ['aft_13800'],               150, False, 'ALL'),
+    'MTE':       (_ME8   + ['aft_13800'],                80, False, 'ALL'),
+    'MT12':      (_BASE14 + ['aft_12000'],              150, False, 'ALL'),
+    'MTD12':     (_MD16  + ['aft_12000'],               150, False, 'ALL'),
+    'MTsr12':    (_BASE14 + ['aft_12000'] + _SR,        150, False, 'ALL'),
+    'MTpr12':    (_BASE14 + ['aft_12000'] + _PR,        150, False, 'ALL'),
+    'MTsrpr12':  (_BASE14 + ['aft_12000'] + _SR + _PR,  150, False, 'ALL'),
+    'MTDsrpr12': (_MD16  + ['aft_12000'] + _SR + _PR,   150, False, 'ALL'),
     # ── Niche 模型 (8 个)：初始权重 0，预热后由滚动 IC 动态发现价值 ────────────
-    'Nep5':      (_ME8  + ['aft_13800'] + _OVI5,            80, True),
-    'Nep12':     (_ME8  + ['aft_12000'] + _OVI5,            80, True),
-    'NSov12':    (_MD16 + ['aft_12000', 'Sect_OVI_ep5', 'Sect_OVI_ep15'] + _SR, 100, True),
-    'NSovT':     (_BASE14 + ['aft_13800', 'Sect_OVI_ep5', 'Sect_OVI_ep15'],     100, True),
-    'Nag12':     (_MD16 + ['aft_12000'] + _SR + _PR  + _OVI5,    30, True),
-    'NagX':      (_MD16 + ['aft_12000'] + _SR + _PR2 + _OVI5,    20, True),
-    'Npr30':     (_BASE14 + ['aft_12000'] + _SR + _PR2,          150, True),
-    'NprD30':    (_MD16  + ['aft_12000'] + _SR + _PR2,           150, True),
+    'Nep5':      (_ME8  + ['aft_13800'] + _OVI5,                        80, True, 'ALL'),
+    'Nep12':     (_ME8  + ['aft_12000'] + _OVI5,                        80, True, 'ALL'),
+    'NSov12':    (_MD16 + ['aft_12000', 'Sect_OVI_ep5', 'Sect_OVI_ep15'] + _SR, 100, True, 'ALL'),
+    'NSovT':     (_BASE14 + ['aft_13800', 'Sect_OVI_ep5', 'Sect_OVI_ep15'],     100, True, 'ALL'),
+    'Nag12':     (_MD16 + ['aft_12000'] + _SR + _PR  + _OVI5,           30, True, 'ALL'),
+    'NagX':      (_MD16 + ['aft_12000'] + _SR + _PR2 + _OVI5,           20, True, 'ALL'),
+    'Npr30':     (_BASE14 + ['aft_12000'] + _SR + _PR2,                 150, True, 'ALL'),
+    'NprD30':    (_MD16  + ['aft_12000'] + _SR + _PR2,                  150, True, 'ALL'),
+    # ── 上午时段专用 Niche 模型 (3 个) ──────────────────────────────────────────
+    'AM_D':      (_MD16  + ['aft_12000'] + _SR,                120, True, 'AM'),
+    'AM_E':      (_ME8   + ['aft_12000'] + _OVI5,               80, True, 'AM'),
+    'AM_F':      (_MD16  + ['aft_12000'] + _SR + _PR + _OVI5,  100, True, 'AM'),
+    # ── OBI 深度失衡特征模型 (2 个) ──────────────────────────────────────────────
+    'MOBI':      (_BASE14 + _OBI_NEW,                           120, True, 'ALL'),
+    'MOBI_D':    (_MD16   + _SR + _OBI_NEW,                     120, True, 'ALL'),
+    # ── VWAP 均值回复模型 (3 个)：vwap_dev 与动量信号形成互补 ─────────────────────
+    'NVol12':    (_BASE14 + ['aft_12000'] + _SR + _VWAP,           150, True, 'ALL'),
+    'NVol_D':    (_MD16  + ['aft_12000'] + _SR + _PR + _VWAP,      120, True, 'ALL'),
+    'NVol_DX':   (_MD16  + ['aft_12000'] + _SR + _PR2 + _OVI5 + _VWAP, 80, True, 'ALL'),
+    # ── 信号一致性交叉特征模型 (3 个)：OVI×TI 乘积项，捕捉非线性增强效应 ──────────
+    'NInter12':  (_BASE14 + ['aft_12000'] + _SR + _INTER,          150, True, 'ALL'),
+    'NInter_D':  (_MD16  + ['aft_12000'] + _SR + _PR + _INTER,     120, True, 'ALL'),
+    'NInter_DX': (_MD16  + ['aft_12000'] + _SR + _PR2 + _OVI5 + _INTER + _VWAP, 80, True, 'ALL'),
 }
 
 # 动态集成超参数
@@ -161,17 +190,28 @@ class MyModel:
     """
     在线预测模型。
 
-    训练：从 train.csv 训练 20 个 Ridge 子模型（全量数据）。
+    训练：从 train.csv 训练 31 个 Ridge 子模型。
+      稳定模型（12 个）：全量 5 日数据训练，预热期等权分配。
+      Niche 模型（8 个）：全量数据训练，预热期权重 0，由滚动 IC 机制发现优势窗口。
+      AM 时段模型（3 个）：仅用 tick_idx <= 13800（上午行情）训练，初始权重 0。
+      OBI 模型（2 个）：使用新增委托深度失衡特征，初始权重 0。
+      VWAP 模型（3 个）：使用日内 VWAP 偏差均值回复信号，初始权重 0。
+      交叉项模型（3 个）：使用 OVI×TI 信号一致性乘积特征，初始权重 0。
     重置：每个新测试日调用 reset()，清除所有状态。
     预测：online_predict() 每 tick 调用一次，增量更新 EMA/SMA 状态并返回集成预测。
 
     新增特征（无前视偏差）：
-      OVI_ep5        = E OVI EMA5 - EMA600（超短期订单动能）
-      Sect_OVI_ep5   = 板块 OVI EMA5  - EMA600
-      Sect_OVI_ep15  = 板块 OVI EMA15 - EMA600
-      past_ret_30    = E 中间价过去 30 tick 收益率
-      past_ret_60    = E 中间价过去 60 tick 收益率
-    在线计算：维护 E 和各板块的601元素中间价缓冲区。
+      TradeImb_ep15  = E TI EMA15 - EMA600（更短期成交量失衡）
+      OBI1_p15       = E 一档买卖量失衡 SMA15 脉冲（即时流动性压力）
+      OBI1_ep15      = E 一档买卖量失衡 EMA15 脉冲
+      OBI_total_p15  = E 五档总买卖量失衡 SMA15 脉冲
+      vwap_dev       = E 中间价偏离日内累积 VWAP（均值回复信号，剪裁 ±1%）
+      ovi_ti_short   = OVI_p15 × TradeImb_p15（短期信号一致性乘积）
+      ovi_ti_medium  = OVI_p60 × TradeImb_p60（中期信号一致性乘积）
+      sect_ovi_ti    = Sect_OVI_p20 × Sect_TI_p40（板块信号一致性乘积）
+      obi_ovi_s      = OBI1_p15 × OVI_p15（深度-流量方向一致性乘积）
+    在线计算：维护 E 和各板块的 601 元素中间价缓冲区及新增 OBI/VWAP 状态。
+    注意：交叉特征由基础特征在线相乘得出，与 data_processor.py 中的计算逻辑完全对应。
     """
 
     def __init__(self):
@@ -196,10 +236,25 @@ class MyModel:
         df = pd.read_csv(csv_path)
         y = df['Return5min'].values
 
-        for name, (feats, alpha, is_niche) in _MODELS_DEF.items():
+        # 计算当日 tick 索引（用于 AM/PM 时段专用模型的训练数据切分）
+        if 'tick_idx' in df.columns:
+            tick_idx_arr = df['tick_idx'].values
+        else:
+            # 兼容旧版 train.csv（无 tick_idx 列）：按 Day 分组内行序重建
+            # 假设同一 Day 内的行按时间升序排列（data_processor.py 保证此顺序）
+            tick_idx_arr = df.groupby('Day').cumcount().values
+        am_mask = tick_idx_arr <= _AM_SPLIT
+        pm_mask = tick_idx_arr >  _AM_SPLIT
+
+        for name, (feats, alpha, is_niche, segment) in _MODELS_DEF.items():
             X = df[feats].values
             m = Ridge(alpha=alpha)
-            m.fit(X, y)
+            if segment == 'AM':
+                m.fit(X[am_mask], y[am_mask])
+            elif segment == 'PM':
+                m.fit(X[pm_mask], y[pm_mask])
+            else:
+                m.fit(X, y)
             self._coefs[name]      = m.coef_.copy()
             self._intercepts[name] = float(m.intercept_)
             self._feat_lists[name] = feats
@@ -220,8 +275,8 @@ class MyModel:
         self._oni_sma = {w: _SMA(w) for w in (15, 30, 600)}
 
         # E 股 EMA
-        self._ti_ema  = {s: _EMA(s) for s in (60, 600)}
-        self._ovi_ema = {s: _EMA(s) for s in (5, 15, 600)}   # 新增 EMA5
+        self._ti_ema  = {s: _EMA(s) for s in (15, 60, 600)}    # 新增 EMA15
+        self._ovi_ema = {s: _EMA(s) for s in (5, 15, 600)}
         self._tni_ema = {s: _EMA(s) for s in (15, 600)}
 
         # 板块 SMA
@@ -231,6 +286,15 @@ class MyModel:
 
         # 板块 EMA（新增，用于 Sect_OVI_ep5/ep15）
         self._s_ovi_ema = {s: _EMA(s) for s in (5, 15, 600)}
+
+        # 新增：E 一档/全档委托深度失衡 (OBI) 跟踪器
+        self._obi1_sma    = {w: _SMA(w) for w in (15, 600)}    # OBI1_p15
+        self._obi1_ema    = {s: _EMA(s) for s in (15, 600)}    # OBI1_ep15
+        self._obi_tot_sma = {w: _SMA(w) for w in (15, 600)}    # OBI_total_p15
+
+        # 新增：日内 VWAP 累积状态（每日重置，用于 vwap_dev 计算）
+        self._cum_trade_vol: float = 0.0
+        self._cum_trade_val: float = 0.0
 
         # 中间价历史缓冲（601 元素，用于 past_ret 和 Return5min 延迟计算）
         self._mid_buf: deque = deque(maxlen=_DELAY + 1)
@@ -275,6 +339,11 @@ class MyModel:
         e_oni = _imb(float(E_row['OrderBuyNum']),     float(E_row['OrderSellNum']))
         e_tni = _imb(float(E_row['TradeBuyNum']),     float(E_row['TradeSellNum']))
         tbv   = sum(float(E_row[f'BidVolume{i}']) for i in range(1, 6))
+        tav   = sum(float(E_row[f'AskVolume{i}']) for i in range(1, 6))
+
+        # 新增：E 委托深度失衡原始信号
+        e_obi1      = _imb(float(E_row['BidVolume1']), float(E_row['AskVolume1']))
+        e_obi_total = _imb(tbv, tav)
 
         # ── 2. 板块均值信号 ───────────────────────────────────────────────────
         s_obi1 = s_ti = s_ovi = s_oni = 0.0
@@ -296,14 +365,25 @@ class MyModel:
         for sma in self._s_ovi_sma.values(): sma.update(s_ovi)
         for sma in self._s_oni_sma.values(): sma.update(s_oni)
         for ema in self._s_ovi_ema.values(): ema.update(s_ovi)
+        # 新增：OBI 深度失衡状态更新
+        for sma in self._obi1_sma.values():    sma.update(e_obi1)
+        for ema in self._obi1_ema.values():    ema.update(e_obi1)
+        for sma in self._obi_tot_sma.values(): sma.update(e_obi_total)
 
-        # ── 4. 更新价格历史缓冲 ───────────────────────────────────────────────
+        # ── 4. 更新价格历史缓冲 & 日内 VWAP 累积 ────────────────────────────────
         mid = (float(E_row['BidPrice1']) + float(E_row['AskPrice1'])) / 2.0
         self._mid_buf.append(mid)
 
         for i, sr in enumerate(sector_rows):
             s_mid = (float(sr['BidPrice1']) + float(sr['AskPrice1'])) / 2.0
             self._sect_mid_buf[i].append(s_mid)
+
+        # VWAP：累积成交量 × 中间价作为成交金额代理，计算偏差
+        trade_vol_e = (float(E_row['TradeBuyVolume']) + float(E_row['TradeSellVolume']))
+        self._cum_trade_vol += trade_vol_e
+        self._cum_trade_val += mid * trade_vol_e
+        _vwap   = self._cum_trade_val / (self._cum_trade_vol + 1e-9)
+        vwap_dev = float(np.clip((mid - _vwap) / (_vwap + 1e-9), -0.01, 0.01))
 
         # ── 5. 计算滞后收益特征 ───────────────────────────────────────────────
         buf_full = len(self._mid_buf) == _DELAY + 1
@@ -341,6 +421,8 @@ class MyModel:
         sov600 = self._s_ovi_sma[600].value()
         son600 = self._s_oni_sma[600].value()
         s_ovi_e600 = self._s_ovi_ema[600].value()
+        obi1_600    = self._obi1_sma[600].value()
+        obi_tot_600 = self._obi_tot_sma[600].value()
 
         fv = {
             'TotalBidVol':    tbv,
@@ -351,6 +433,7 @@ class MyModel:
             'TradeImb_p40':   self._ti_sma[40].value()  - t600,
             'TradeImb_p60':   self._ti_sma[60].value()  - t600,
             'TradeImb_ep60':  self._ti_ema[60].value()  - self._ti_ema[600].value(),
+            'TradeImb_ep15':  self._ti_ema[15].value()  - self._ti_ema[600].value(),
             'OVI_p15':        self._ovi_sma[15].value() - ov600,
             'OVI_p30':        self._ovi_sma[30].value() - ov600,
             'OVI_p60':        self._ovi_sma[60].value() - ov600,
@@ -359,6 +442,9 @@ class MyModel:
             'ONI_p15':        self._oni_sma[15].value() - on600,
             'ONI_p30':        self._oni_sma[30].value() - on600,
             'TNI_ep15':       self._tni_ema[15].value() - self._tni_ema[600].value(),
+            'OBI1_p15':       self._obi1_sma[15].value()    - obi1_600,
+            'OBI1_ep15':      self._obi1_ema[15].value()    - self._obi1_ema[600].value(),
+            'OBI_total_p15':  self._obi_tot_sma[15].value() - obi_tot_600,
             'Sect_OBI1':      s_obi1,
             'E_TI_rel_600':   t600 - sti600,
             'Sect_TI_p40':    self._s_ti_sma[40].value()  - sti600,
@@ -375,7 +461,15 @@ class MyModel:
             'past_ret_120':   past_ret_120,
             'past_ret_300':   past_ret_300,
             'past_ret_600':   past_ret_600,
+            'vwap_dev':       vwap_dev,
         }
+
+        # 信号一致性交叉特征（计算时所有基础特征已就绪）
+        # 与 data_processor.py 中的离线计算保持完全一致（在线重复计算是必要的）
+        fv['ovi_ti_short']  = fv['OVI_p15']      * fv['TradeImb_p15']
+        fv['ovi_ti_medium'] = fv['OVI_p60']      * fv['TradeImb_p60']
+        fv['sect_ovi_ti']   = fv['Sect_OVI_p20'] * fv['Sect_TI_p40']
+        fv['obi_ovi_s']     = fv['OBI1_p15']     * fv['OVI_p15']
 
         # ── 7. 各子模型预测 ───────────────────────────────────────────────────
         model_preds: dict = {}
