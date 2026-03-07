@@ -190,17 +190,19 @@ MODELS = {
     # ── 新增 Niche 模型（Iter15，动量加速度 ret_accel 信号验证）─────────────────────
     # 背景：ret_accel = past_ret_300 - past_ret_600（价格动量加速度）在 Day1=0.134,
     #        Day5=0.136，全日均值 IC=0.087，与 past_ret_600 负相关（-0.684）但独立维度。
-    # 三模型配置分工互补：ME2框架（含aft_12000）+无时间特征（T框架）+ME9（含ONI_ep15）
+    # 三模型配置分工互补：
+    #   "ME2"命名规则（项目约定）= 含 aft_12000（下午12000tick后），可使用 ME8 或 ME9 基础特征
+    #   本轮 N_raccel_ME2 使用 ME9 基础（含ONI_ep15），与旧 ME2 模型（ME8）形成信号扩展
     # 最终效果：inner4折IC 0.2938→0.2964（+0.0026），5折CV IC 0.3076→0.3101（+0.0025），
     #           ICIR 7.37→7.45。ewma_beta 0.01→0.005 配合使用效果最佳。
     #
     # N_raccel_ME2: ME9（含ONI_ep15）+ ret_accel + aft_12000（下午时段特化）
-    #   → inner4折IC中贡献最强，Day4提升 +0.0014
+    #   → inner4折IC中贡献最强，Day4提升 +0.0014；"ME2"指含aft_12000，基础用ME9
     'N_raccel_ME2':   (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
     # N_raccel_T: ME8 + ret_accel + IXN3（无时间特征，全日均匀贡献）
     #   → 开盘段和 PM-3 段表现好，与 N_raccel_ME2 互补
     'N_raccel_T':     (_ME8 + _RACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_raccel_ME9T: ME9 + ret_accel + IXN3（无时间特征+ONI_ep15，综合版）
+    # N_raccel_ME9T: ME9（含ONI_ep15）+ ret_accel + IXN3（无时间特征，综合版）
     #   → 在 38→39 模型扩展中增益最大（inner4fold +0.0008），与前两个形成三角覆盖
     'N_raccel_ME9T':  (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
 }
