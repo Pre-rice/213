@@ -7,24 +7,23 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：36 个 Ridge 子模型（12 稳定 + 24 niche）+ 保守化自适应权重
+# 动态集成架构：39 个 Ridge 子模型（12 稳定 + 27 niche）+ 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
 #   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
 #
-# Niche 模型（24 个，Iter14 新增 3 个）：
-#   Iter13基础上新增 N_bp_IXN3, N_rxti_T, N_bp_deep_T（book_pres_pulse + ret_x_ti600）
-#   book_pres_pulse: 全5档委托失衡脉冲（与obi_deep_p15互补，均值IC≈0.079）
-#   ret_x_ti600: past_ret_600×TradeImb_600（动量方向双重确认交互，Day1 IC=+0.187）
+# Niche 模型（27 个，Iter15 新增 3 个）：
+#   Iter14基础上新增 N_raccel_ME2, N_raccel_T, N_raccel_ME9T（ret_accel动量加速度）
+#   ret_accel = past_ret_300 - past_ret_600（动量变化方向，Day1/5 IC=+0.134/0.136）
 #
-# Iter14 优化（时间段IC分析 + inner 4-fold IC验证）：
-#   时间段分析发现：AM-1(3k-6k)最弱（mean=0.127），PM-3(21k-24k)最强（0.401）
-#   新信号 book_pres_pulse 和 ret_x_ti600 在内层4折IC中与 IXN3 结合最有效：
-#     inner 4-fold IC: 0.2924→0.2938（+0.0014）
-#     5-fold CV IC: 0.3055→0.3076（+0.002）
-#     ICIR: 7.33→7.37（最高 ICIR）
-#     Day1: 0.252→0.259(+0.007), Day2: 0.370→0.376(+0.006), Day5: 0.295→0.300(+0.005)
+# Iter15 优化（ewma_beta搜索 + 动量加速度特征验证）：
+#   ewma_beta: 0.01→0.005（更慢EWMA，权重变化更平稳，减少单日过拟合）
+#   三个 N_raccel 模型覆盖不同时段框架（ME2/T/ME9T），互补增益：
+#     inner 4-fold IC: 0.2938→0.2964（+0.0026，+0.88%）
+#     5-fold CV IC: 0.3076→0.3101（+0.0025，+0.81%）
+#     ICIR: 7.37→7.45（+0.08）
+#     Day1: 0.259→0.264(+0.005), Day2: 0.376→0.378(+0.002), Day5: 0.300→0.307(+0.007)
 #
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -96,6 +95,10 @@ _IXN4 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi']
 # _RXTI: ret_x_ti600 = past_ret_600 × TradeImb_600（动量方向双重确认交互）
 _BP   = ['book_pres_pulse']
 _RXTI = ['ret_x_ti600']
+
+# 新增（Iter15）：近期价格收益率加速度（动量变化方向）
+# ret_accel = past_ret_300 - past_ret_600，捕捉价格趋势加速/减速
+_RACCEL = ['ret_accel']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -184,6 +187,22 @@ MODELS = {
     # N_bp_deep_T: book_pres_pulse + obi_deep_p15（全档+深档双层书压，互补组合）
     #   → 与 N_bp_IXN3/N_rxti_T 配合，三模型组合给出最高 ICIR=7.37（基线7.33）
     'N_bp_deep_T':    (_ME8 + _BP + _DEEP + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 15, True),
+    # ── 新增 Niche 模型（Iter15，动量加速度 ret_accel 信号验证）─────────────────────
+    # 背景：ret_accel = past_ret_300 - past_ret_600（价格动量加速度）在 Day1=0.134,
+    #        Day5=0.136，全日均值 IC=0.087，与 past_ret_600 负相关（-0.684）但独立维度。
+    # 三模型配置分工互补：ME2框架（含aft_12000）+无时间特征（T框架）+ME9（含ONI_ep15）
+    # 最终效果：inner4折IC 0.2938→0.2964（+0.0026），5折CV IC 0.3076→0.3101（+0.0025），
+    #           ICIR 7.37→7.45。ewma_beta 0.01→0.005 配合使用效果最佳。
+    #
+    # N_raccel_ME2: ME9（含ONI_ep15）+ ret_accel + aft_12000（下午时段特化）
+    #   → inner4折IC中贡献最强，Day4提升 +0.0014
+    'N_raccel_ME2':   (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_raccel_T: ME8 + ret_accel + IXN3（无时间特征，全日均匀贡献）
+    #   → 开盘段和 PM-3 段表现好，与 N_raccel_ME2 互补
+    'N_raccel_T':     (_ME8 + _RACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_raccel_ME9T: ME9 + ret_accel + IXN3（无时间特征+ONI_ep15，综合版）
+    #   → 在 38→39 模型扩展中增益最大（inner4fold +0.0008），与前两个形成三角覆盖
+    'N_raccel_ME9T':  (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
@@ -210,10 +229,9 @@ NICHE_INIT_WEIGHT   = 0.0    # niche 模型预热期权重（0 = 完全等待滚
 
 # 稳定化参数（Iter13内层4折网格搜索优化）
 ENSEMBLE_UPDATE_FREQ = 15    # 权重更新频率（Iter13优化 30→15，更频繁但IC估计更稳定）
-ENSEMBLE_EWMA_BETA   = 0.01  # IC 的 EWMA alpha 系数（Iter13优化 0.02→0.01，更慢更稳）
-                             # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.01 → 历史权重0.99
-                             # 注：更慢EWMA与更频繁更新（update_freq=15）互补：
-                             #     每次用稳定IC估计更新权重，而非减少更新次数来规避噪声
+ENSEMBLE_EWMA_BETA   = 0.005 # IC 的 EWMA alpha 系数（Iter15优化 0.01→0.005，更慢更稳）
+                             # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.005 → 历史权重0.995
+                             # 注：更慢EWMA使权重变化更平滑，对 Day2 IC 改善显著（过拟合减少）
 STABLE_PRIOR        = 0.0    # 稳定模型权重下限（CV验证 stable_prior>0 持续降IC，不采用）
 
 

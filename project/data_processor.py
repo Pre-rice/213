@@ -119,6 +119,11 @@ def process_day_data(day_data):
                                 全 5 日 IC 一致正向（0.051-0.116），均值约 0.079
      49.  ret_x_ti600         - past_ret_600 × TradeImb_600（价格方向 × 成交流量方向确认）
                                 Day1 IC=+0.187, Day2=+0.118，均值约 0.097；与 ovi_x_abs_ret 互补
+
+    ── Iter15 新增（动量加速度信号）──────────────────────────────────────────────
+     50.  ret_accel           - past_ret_300 - past_ret_600（近期价格收益率加速度）
+                                Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019）
+                                与 past_ret_600 负相关（-0.684）但提供独立动量加速度维度
     """
     e = day_data['E']
 
@@ -432,6 +437,19 @@ def process_day_data(day_data):
     # 实证：Day1 IC=+0.187, Day2=+0.118，全 5 日均值约 0.097（Day3/4 略负但小）
     feats['ret_x_ti600'] = np.clip(pr600 * feats['TradeImb_600'] * 20, -0.5, 0.5)
 
+    # ── 新增（Iter15）──────────────────────────────────────────────────────────
+
+    # ret_accel: 近期价格收益率加速度（动量变化方向）
+    # 定义：past_ret_300 - past_ret_600（2.5分钟收益 vs 5分钟收益的差值）
+    # 理念：当短期价格运动加速时（ret_300 > ret_600），趋势持续概率更高；
+    #       当减速（ret_300 < ret_600），可能预示均值回复。
+    # 实证：Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019，Day4）
+    #       与 past_ret_600 负相关（-0.684）但提供独立的动量加速度维度
+    #       配合 ME9 + IXN3 框架效果最佳（三种模型配置各有分工）
+    feats['ret_accel'] = np.clip(
+        feats['past_ret_300'] - feats['past_ret_600'],
+        -0.1, 0.1)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -455,6 +473,8 @@ def process_day_data(day_data):
         'ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi',
         # 新增（Iter14）：全档书压脉冲 + 价格×成交流量方向确认交互
         'book_pres_pulse', 'ret_x_ti600',
+        # 新增（Iter15）：近期价格收益率加速度（动量变化方向）
+        'ret_accel',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

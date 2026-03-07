@@ -148,7 +148,7 @@ class _RollingIC:
 class MyModel:
     """
     在线预测模型。
-    init 中训练全部 36 个 Ridge 子模型（在 train.csv 全量数据上）。
+    init 中训练全部 39 个 Ridge 子模型（在 train.csv 全量数据上）。
     online_predict 接受逐 tick 数据，返回该 tick 的 Return5min 预测值。
     """
 
@@ -443,7 +443,7 @@ class MyModel:
         smr30  = _price_ret(self._smid_buf,  30, _RET_CLIP_SHORT)
         smr120 = _price_ret(self._smid_buf, 120, _RET_CLIP_LONG)
 
-        # ── 组装 49 个特征 ─────────────────────────────────────────────────
+        # ── 组装 52 个特征 ─────────────────────────────────────────────────
         ovi_p15 = ovi15 - ovi600
 
         feats_arr = {
@@ -506,6 +506,8 @@ class MyModel:
             # Iter14 新增
             'book_pres_pulse':    float(np.clip(bp15 - bp600, -0.5, 0.5)),
             'ret_x_ti600':        float(np.clip(pr600 * ti600 * 20, -0.5, 0.5)),
+            # Iter15 新增
+            'ret_accel':          float(np.clip(pr300 - pr600, -0.1, 0.1)),
         }
 
         # NaN/Inf 清洗
