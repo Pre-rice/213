@@ -49,9 +49,10 @@ def process_day_data(day_data):
     ── E 委托笔数失衡 (ONI) 脉冲 ────────────────────────────────────────────────
      14.  ONI_p15             - ONI SMA15 - SMA600
      15.  ONI_p30             - ONI SMA30 - SMA600
+     16.  ONI_ep15            - ONI EMA15 - EMA600 (指数加权短期委托笔数失衡，Day1 IC≈0.20)
 
     ── E 成交笔数失衡 EMA 脉冲 ─────────────────────────────────────────────────
-     16.  TNI_ep15            - TNI EMA15 - EMA600
+     17.  TNI_ep15            - TNI EMA15 - EMA600
 
     ── 板块均值信号 ─────────────────────────────────────────────────────────────
      17.  Sect_OBI1           - 板块 (ABCD) 一档委托失衡均值
@@ -74,6 +75,8 @@ def process_day_data(day_data):
      30.  past_ret_120        - E 中间价过去 1 分钟收益率 (120 ticks)
      31.  past_ret_300        - E 中间价过去 2.5 分钟收益率 (300 ticks)
      32.  past_ret_600        - E 中间价过去 5 分钟收益率 (600 ticks)
+     33.  past_ret_900        - E 中间价过去 7.5 分钟收益率 (900 ticks)
+                                Day5 IC=+0.26（均值回复），Day3 IC=+0.20，Day1 IC=+0.17
 
     ── 板块短期价格收益率 & 横截面相对收益（新增）────────────────────────────
      33.  sect_mid_ret_30     - 板块(ABCD)平均中间价过去 15 秒收益率 (订单流外的价格信息)
@@ -109,6 +112,18 @@ def process_day_data(day_data):
                                 Day4 IC=+0.25，捕捉"流量积累方向与近期价格反转"的双重确认
      47.  oni_x_ovi           - ONI_p15 × OVI_p15（委托笔数 × 委托量双重失衡共振）
                                 当订单数量与资金量方向一致时信号更强（全 5 日一致正向）
+
+    ── Iter14 新增（时间段分析指导）──────────────────────────────────────────────
+     48.  book_pres_pulse     - E 股全 5 档委托失衡 SMA15 - SMA600 脉冲
+                                与 obi_deep_p15（2-5档）互补（含1档即时深度），
+                                全 5 日 IC 一致正向（0.051-0.116），均值约 0.079
+     49.  ret_x_ti600         - past_ret_600 × TradeImb_600（价格方向 × 成交流量方向确认）
+                                Day1 IC=+0.187, Day2=+0.118，均值约 0.097；与 ovi_x_abs_ret 互补
+
+    ── Iter15 新增（动量加速度信号）──────────────────────────────────────────────
+     50.  ret_accel           - past_ret_300 - past_ret_600（近期价格收益率加速度）
+                                Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019）
+                                与 past_ret_600 负相关（-0.684）但提供独立动量加速度维度
     """
     e = day_data['E']
 
@@ -143,6 +158,9 @@ def process_day_data(day_data):
     tni_e15  = _ema(e_tni,  15).values
     tni_e600 = _ema(e_tni, 600).values
 
+    oni_e15  = _ema(e_oni,  15).values
+    oni_e600 = _ema(e_oni, 600).values
+
     feats = {
         'TotalBidVol':   TotalBidVol,
         'TradeImb_600':  ti_600,
@@ -159,6 +177,7 @@ def process_day_data(day_data):
         'OVI_ep5':       ovi_e5  - ovi_e600,
         'ONI_p15':       oni_15  - oni_600,
         'ONI_p30':       oni_30  - oni_600,
+        'ONI_ep15':      oni_e15 - oni_e600,
         'TNI_ep15':      tni_e15 - tni_e600,
     }
 
@@ -211,24 +230,42 @@ def process_day_data(day_data):
     # 核心思路：Return5min(t) 在 t+600 时可知，因此 Return5min(t-600) 在 t 时
     # 已完全已知，无任何前视偏差。这些滞后收益携带市场动量/反转信息。
     #
+    # 冷启动处理（参考 suggestion.md §2.1）：
+    #   日初前 lag 个 tick 无历史可知，使用当日"有效收益"的均值填充（而非 0）。
+    #   0 具有强先验意义（"无收益"），会在冷启动期产生可学习但不泛化的假信号。
+    #   使用当日均值（t>=lag 后的均值）能更中性地表示"信息不足"状态。
+    #   注：在线预测时同样应使用运行均值（每日观测到的均值）填充冷启动期。
+    #
     # sect_ret_lag: 板块(ABCD)过去5分钟平均已实现收益（各股取平均）
     # e_ret_lag:    E股自身过去5分钟已实现收益（均值回复信号）
     # past_ret_120/300/600: E股中间价在过去 1/2.5/5 分钟内的收益率
+
+    def _fillna_daymean(arr):
+        """用有效值（非NaN）的均值替代NaN，避免用0填充冷启动期
+        若当日无任何有效值（极端情况，如数据损坏），则退化为0.0（中性值）"""
+        s = pd.Series(arr)
+        valid_mean = s.dropna().mean()
+        if np.isnan(valid_mean):
+            valid_mean = 0.0  # 极端情况退化：整日无有效收益数据时使用中性值
+        return s.fillna(valid_mean).values
+
     sect_ret_arr = np.zeros(len(e))
     for s in ('A', 'B', 'C', 'D'):
-        sect_ret_arr += (pd.Series(day_data[s]['Return5min'].values)
-                         .shift(600).fillna(0.0).values / 4.0)
+        sect_ret_arr += (_fillna_daymean(
+            pd.Series(day_data[s]['Return5min'].values).shift(600).values
+        ) / 4.0)
     feats['sect_ret_lag'] = np.clip(sect_ret_arr, -_RET_CLIP_LONG, _RET_CLIP_LONG)
     feats['e_ret_lag'] = np.clip(
-        pd.Series(e['Return5min'].values).shift(600).fillna(0.0).values,
+        _fillna_daymean(pd.Series(e['Return5min'].values).shift(600).values),
         -_RET_CLIP_LONG, _RET_CLIP_LONG)
 
     mid = (e['BidPrice1'].values + e['AskPrice1'].values) / 2.0
     mid_s = pd.Series(mid)
-    for lag in (30, 60, 120, 300, 600):
+    for lag in (30, 60, 120, 300, 600, 900):
         clip = _RET_CLIP_SHORT if lag <= 60 else _RET_CLIP_LONG
-        ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).fillna(0.0).values
-        feats[f'past_ret_{lag}'] = np.clip(ret, -clip, clip)
+        ret = (mid_s - mid_s.shift(lag)).divide(mid_s.shift(lag) + 1e-9).values
+        ret = np.clip(_fillna_daymean(ret), -clip, clip)
+        feats[f'past_ret_{lag}'] = ret
 
     # ── 板块短期价格收益率 & 跨截面相对收益（新增）─────────────────────────────
     # 现有板块特征（Sect_TI_p40, Sect_OVI_p20 等）均基于订单流失衡，
@@ -241,8 +278,8 @@ def process_day_data(day_data):
     sect_mid_s = pd.Series(sect_mid)
     for lag, clip in ((30, _RET_CLIP_SHORT), (120, _RET_CLIP_LONG)):
         s_ret = (sect_mid_s - sect_mid_s.shift(lag)).divide(
-            sect_mid_s.shift(lag) + 1e-9).fillna(0.0).values
-        feats[f'sect_mid_ret_{lag}'] = np.clip(s_ret, -clip, clip)
+            sect_mid_s.shift(lag) + 1e-9).values
+        feats[f'sect_mid_ret_{lag}'] = np.clip(_fillna_daymean(s_ret), -clip, clip)
 
     # csm_ret_120: 板块 1 分钟收益 – E 自身 1 分钟收益
     # 若 > 0：板块领先 E，E 可能追涨（动能跟随）或均值回复（反转）
@@ -338,7 +375,7 @@ def process_day_data(day_data):
     # 提供比 e_ret_lag（600-tick）更长时间轴的反转信号：
     # Day5 IC=-0.25（偏相关 -0.18），Day2/3 IC=-0.18。
     feats['e_ret_lag2'] = np.clip(
-        pd.Series(e['Return5min'].values).shift(900).fillna(0.0).values,
+        _fillna_daymean(pd.Series(e['Return5min'].values).shift(900).values),
         -_RET_CLIP_LONG, _RET_CLIP_LONG)
 
     # ── 交互特征（新增）─────────────────────────────────────────────────────────
@@ -380,17 +417,51 @@ def process_day_data(day_data):
     oni_pulse = feats['ONI_p15']
     feats['oni_x_ovi'] = np.clip(oni_pulse * ovi_pulse * 5, -0.5, 0.5)
 
+    # ── 新增（Iter14）──────────────────────────────────────────────────────────
+
+    # book_pres_pulse: E 股全 5 档委托买卖失衡 SMA15 - SMA600 脉冲
+    # 与 obi_deep_p15（2-5 档）互补：本信号包含 1 档（即时深度），捕捉更宽的市场深度方向
+    # 实证：全 5 日 IC 一致为正（0.051-0.116），均值约 0.079，
+    #       与 obi_deep_p15（相关性约 0.6）互补，合并使用能提升 Day1/3/5 预测
+    bid_vol_all = np.sum([e[f'BidVolume{i}'].values for i in range(1, 6)], axis=0)
+    ask_vol_all = np.sum([e[f'AskVolume{i}'].values for i in range(1, 6)], axis=0)
+    book_pres = _imb(bid_vol_all, ask_vol_all)
+    feats['book_pres_pulse'] = np.clip(
+        _sma(book_pres, 15).values - _sma(book_pres, 600).values,
+        -0.5, 0.5)
+
+    # ret_x_ti600: 近期价格方向 × 长期成交失衡（动量确认交互）
+    # 理念：当 5 分钟价格走势与长期成交量失衡方向一致时，信号更可靠
+    #       与 ovi_x_abs_ret 互补：本信号用有符号价格收益而非绝对值，
+    #       捕捉"方向双重确认"（价格 + 成交流量）而非"幅度条件化"
+    # 实证：Day1 IC=+0.187, Day2=+0.118，全 5 日均值约 0.097（Day3/4 略负但小）
+    feats['ret_x_ti600'] = np.clip(pr600 * feats['TradeImb_600'] * 20, -0.5, 0.5)
+
+    # ── 新增（Iter15）──────────────────────────────────────────────────────────
+
+    # ret_accel: 近期价格收益率加速度（动量变化方向）
+    # 定义：past_ret_300 - past_ret_600（2.5分钟收益 vs 5分钟收益的差值）
+    # 理念：当短期价格运动加速时（ret_300 > ret_600），趋势持续概率更高；
+    #       当减速（ret_300 < ret_600），可能预示均值回复。
+    # 实证：Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019，Day4）
+    #       与 past_ret_600 负相关（-0.684）但提供独立的动量加速度维度
+    #       配合 ME9 + IXN3 框架效果最佳（三种模型配置各有分工）
+    feats['ret_accel'] = np.clip(
+        feats['past_ret_300'] - feats['past_ret_600'],
+        -0.1, 0.1)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
         'TradeImb_p15', 'TradeImb_p30', 'TradeImb_p40', 'TradeImb_p60', 'TradeImb_ep60',
         'OVI_p15', 'OVI_p30', 'OVI_p60', 'OVI_ep15', 'OVI_ep5',
-        'ONI_p15', 'ONI_p30', 'TNI_ep15',
+        'ONI_p15', 'ONI_p30', 'ONI_ep15', 'TNI_ep15',
         'Sect_OBI1', 'E_TI_rel_600', 'Sect_TI_p40', 'Sect_OVI_p20', 'Sect_ONI_p30',
         'Sect_OVI_ep5', 'Sect_OVI_ep15',
         'aft_13800', 'aft_12000',
         'sect_ret_lag', 'e_ret_lag',
         'past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600',
+        'past_ret_900',
         # 新增：板块短期价格收益率 + 横截面相对收益 + E 价差脉冲 + 大单成交失衡
         'sect_mid_ret_30', 'sect_mid_ret_120', 'csm_ret_120', 'e_spread_pulse',
         'lot_imb_15', 'sect_lot_imb_15',
@@ -400,6 +471,10 @@ def process_day_data(day_data):
         'cum_flow_imb', 'sect_cum_flow_imb', 'e_ret_lag2',
         # 新增：交互特征（非线性信号增强）
         'ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum', 'oni_x_ovi',
+        # 新增（Iter14）：全档书压脉冲 + 价格×成交流量方向确认交互
+        'book_pres_pulse', 'ret_x_ti600',
+        # 新增（Iter15）：近期价格收益率加速度（动量变化方向）
+        'ret_accel',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})
