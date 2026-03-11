@@ -38,6 +38,16 @@ warnings.filterwarnings('ignore')
 #     Inner_Std: 0.0147→0.0134（-9%，跨日稳定性显著改善）
 #     5-fold CV IC: 0.3101→0.3117（+0.0015，+0.49%）
 #
+# Iter17 优化（集成参数微调，恢复 Day1 + 提升 ICIR）：
+#   temp: 15→17（更积极集中权重到强 IC 模型，Day1 恢复 +0.007）
+#   ewma_beta: 0.005→0.007（稍快响应，配合高温度效果最佳）
+#   效果（vs Iter16）：
+#     ICIR: 7.19→7.48（+0.29，历史最高）
+#     5-fold CV IC: 0.3110→0.3114（+0.0004）
+#     Inner 4-fold IC: 0.2976→0.2980（+0.0004）
+#     Penalized (M-0.5S): 0.2910→0.2914（+0.0005）
+#     Day1: 0.257→0.264（+0.007，完全恢复 Iter15 水平）
+#
 # ════════════════════════════════════════════════════════════════════════════════
 
 _BASE14 = [
@@ -280,16 +290,17 @@ MODEL_IS_NICHE = [v[2] for v in MODELS.values()]
 #     Day4: 0.2885→0.2799(-0.009), Day5: 0.2787→0.2939(+0.015)
 #   硬日（Day1/5）显著提升，软日（Day2/3）基本持平，Day4轻微下降。
 ENSEMBLE_WINDOW     = 600    # 滚动 IC 窗口 (tick 数，约 5 分钟；Iter13优化 900→600)
-ENSEMBLE_TEMP       = 15     # softmax 温度（Iter13优化 12→15，更积极集中）
+ENSEMBLE_TEMP       = 17     # softmax 温度（Iter17优化 15→17，配合ewma=0.007更高ICIR）
 ENSEMBLE_FLOOR      = 0.0    # 权重下限（CV验证 floor>0 在本数据集会降IC）
 RETURN_DELAY        = 600    # Return5min 可知延迟 = 5 分钟 / 0.5s = 600 ticks
 NICHE_INIT_WEIGHT   = 0.0    # niche 模型预热期权重（0 = 完全等待滚动IC发现价值）
 
 # 稳定化参数（Iter13内层4折网格搜索优化）
 ENSEMBLE_UPDATE_FREQ = 15    # 权重更新频率（Iter13优化 30→15，更频繁但IC估计更稳定）
-ENSEMBLE_EWMA_BETA   = 0.005 # IC 的 EWMA alpha 系数（Iter15优化 0.01→0.005，更慢更稳）
-                             # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.005 → 历史权重0.995
-                             # 注：更慢EWMA使权重变化更平滑，对 Day2 IC 改善显著（过拟合减少）
+ENSEMBLE_EWMA_BETA   = 0.007 # IC 的 EWMA alpha 系数（Iter17优化 0.005→0.007，配合temp=17更好）
+                             # 公式：EWMA(t) = α*IC(t) + (1-α)*EWMA(t-1)，α=0.007
+                             # 注：Iter17 从0.005提升至0.007，更快响应近期IC变化，
+                             #     配合 temp=17 使集成在 Day1 恢复（0.257→0.264），ICIR 7.19→7.48
 STABLE_PRIOR        = 0.0    # 稳定模型权重下限（CV验证 stable_prior>0 持续降IC，不采用）
 
 
