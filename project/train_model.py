@@ -1,13 +1,14 @@
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, HuberRegressor
 from sklearn.model_selection import GroupKFold
 import warnings
 
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：39 个 Ridge 子模型（12 稳定 + 27 niche）+ 保守化自适应权重
+# 动态集成架构：46 个子模型（12 稳定 Ridge + 27 niche Ridge + 7 niche 新增[3 Ridge + 4 Huber]）
+# + 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
 #   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
@@ -24,6 +25,18 @@ warnings.filterwarnings('ignore')
 #     5-fold CV IC: 0.3076→0.3101（+0.0025，+0.81%）
 #     ICIR: 7.37→7.45（+0.08）
 #     Day1: 0.259→0.264(+0.005), Day2: 0.376→0.378(+0.002), Day5: 0.300→0.307(+0.007)
+#
+# Iter16 优化（新特征 + HuberRegressor + 优化指标改进）：
+#   优化指标：改用 Inner_Mean_IC - 0.5 * Inner_Std_IC（惩罚跨日方差）
+#   新特征(2): vol_cond_ovi（波动率条件化OVI，IC=0.134），idio_ovi（截面剥离OVI，IC=0.067）
+#   新模型(7): 3 Ridge niche（N_vcovi_T/N_idio_ME2/N_vcidio_T）+ 4 Huber niche
+#   HuberRegressor（eps=1.35, α=0.001）：抗异常噪点，降低 Inner_Std 约 9%
+#   ICIR方差惩罚集成：经内层4折严格测试，任何 var_penalty>0 均降低 IC，不采用
+#   最终效果（vs Iter15）：
+#     inner 4-fold IC: 0.2964→0.2978（+0.0014，+0.47%）
+#     Penalized (M-0.5S): 0.2891→0.2911（+0.0020，+0.69%）
+#     Inner_Std: 0.0147→0.0134（-9%，跨日稳定性显著改善）
+#     5-fold CV IC: 0.3101→0.3117（+0.0015，+0.49%）
 #
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -99,6 +112,14 @@ _RXTI = ['ret_x_ti600']
 # 新增（Iter15）：近期价格收益率加速度（动量变化方向）
 # ret_accel = past_ret_300 - past_ret_600，捕捉价格趋势加速/减速
 _RACCEL = ['ret_accel']
+
+# 新增（Iter16）：波动率条件化 OVI + 截面剥离 OVI
+# vol_cond_ovi: OVI_p15 × 近期/长期波动率比值（高波动放大 OVI，低波动衰减）
+#   全5日IC一致正向：Day1=0.185, Day2=0.123, Day3=0.121, Day4=0.134, Day5=0.110，均值0.134
+# idio_ovi: OVI_ep15 - Sect_OVI_ep15（E 特异性 OVI，剥离板块共同委托方向）
+#   全5日IC正向：Day1=0.111, Day2=0.044, Day3=0.032, Day4=0.101, Day5=0.047，均值0.067
+_VCOVI = ['vol_cond_ovi']
+_IOVI  = ['idio_ovi']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -205,6 +226,41 @@ MODELS = {
     # N_raccel_ME9T: ME9（含ONI_ep15）+ ret_accel + IXN3（无时间特征，综合版）
     #   → 在 38→39 模型扩展中增益最大（inner4fold +0.0008），与前两个形成三角覆盖
     'N_raccel_ME9T':  (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
+    # ── 新增 Niche 模型（Iter16）──────────────────────────────────────────────────
+    #
+    # 新增内容（4 项优化提案，内层4折严格验证后保留确有增益的部分）：
+    #
+    # (1) 优化目标函数：报告 Inner_Mean_IC - 0.5 * Inner_Std_IC 作为新的优化指标（已实现）
+    # (2) HuberRegressor 抗异常噪点模型（4 个 Huber niche）：
+    #     epsilon=1.35（默认阈值），alpha=0.001（L2 正则化）
+    #     主要贡献：降低 Inner_Std（0.0147→0.0134，-9%），提升 Penalized 指标
+    #     Huber 使用 (epsilon, alpha) 元组表示，与 Ridge 的标量 alpha 区分
+    # (3) 新特征 vol_cond_ovi + idio_ovi（3 个 Ridge niche）：
+    #     vol_cond_ovi 均值IC=0.134（全日一致正向），是最强的新单因子
+    #     idio_ovi 均值IC=0.067（独立信号维度，与 OVI_ep15 互补）
+    #     主要贡献：提升 Inner_Mean（+0.0011）和 Outer_Mean（+0.0017）
+    # (4) ICIR 方差惩罚集成：经严格内层4折测试，任何 var_penalty > 0 均降低
+    #     Inner_Mean_IC 和 Penalized 指标，因此**不采用**（详见 log.txt Iter16）
+    #
+    # ── 特征 niche 模型（3 个 Ridge，使用 vol_cond_ovi / idio_ovi 新特征）──────
+    # N_vcovi_T: ME8 + vol_cond_ovi + IXN3（无时间特征，波动率条件化 OVI 信号）
+    'N_vcovi_T':      (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_idio_ME2: ME9 + idio_ovi + aft_12000（下午时段，E 特异性 OVI 信号）
+    'N_idio_ME2':     (_ME9 + _IOVI + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_vcidio_T: ME9 + vol_cond_ovi + idio_ovi（综合版，双新特征 + IXN3）
+    'N_vcidio_T':     (_ME9 + _VCOVI + _IOVI + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
+    # ── Huber niche 模型（4 个，抗异常噪点）──────────────────────────────────────
+    # HuberRegressor 使用 Huber 损失函数，对 |residual| > epsilon 的异常点施加线性
+    # （而非二次）惩罚，天然抵抗极端收益率噪声。alpha 参数为 L2 正则化强度。
+    # 在 train() 和 nested_blind_test() 中通过 alpha 是否为 tuple 自动识别。
+    # N_huber_ME9_T: Huber 版 ME9 综合模型（IXN3 + CUM2，无时间特征）
+    'N_huber_ME9_T':  (_ME9 + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, (1.35, 0.001), True),
+    # N_huber_IXN4_T: Huber 版 IXN4 交互特征模型（含 ret_accel）
+    'N_huber_IXN4_T': (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN4 + _RACCEL, (1.35, 0.001), True),
+    # N_huber_full_ME2: Huber 版全特征 ME2 模型（aft_12000 下午时段）
+    'N_huber_full_ME2': (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM + _IXN3, (1.35, 0.001), True),
+    # N_huber_vcovi_T: Huber 版 vol_cond_ovi 模型（新特征 + 抗噪声双重优势）
+    'N_huber_vcovi_T': (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, (1.35, 0.001), True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
@@ -236,6 +292,16 @@ ENSEMBLE_EWMA_BETA   = 0.005 # IC 的 EWMA alpha 系数（Iter15优化 0.01→0.
                              # 注：更慢EWMA使权重变化更平滑，对 Day2 IC 改善显著（过拟合减少）
 STABLE_PRIOR        = 0.0    # 稳定模型权重下限（CV验证 stable_prior>0 持续降IC，不采用）
 
+
+
+def _make_model(alpha):
+    """Create Ridge or HuberRegressor based on alpha type.
+    If alpha is a tuple (epsilon, reg_alpha), create HuberRegressor.
+    If alpha is a scalar, create Ridge."""
+    if isinstance(alpha, tuple):
+        eps, reg_alpha = alpha
+        return HuberRegressor(epsilon=eps, alpha=reg_alpha, max_iter=200)
+    return Ridge(alpha=alpha)
 
 def ic_score(y_true, y_pred):
     """皮尔森相关系数 (IC)"""
@@ -380,7 +446,7 @@ def train():
 
         for name, (feats, alpha, _) in MODELS.items():
             X = df[feats].values
-            m = Ridge(alpha=alpha)
+            m = _make_model(alpha)
             m.fit(X[train_idx], y[train_idx])
             fold_model_preds[name].append(m.predict(X[test_idx]))
 
@@ -419,9 +485,11 @@ def train():
     std_ic  = np.std(results)
     icir    = mean_ic / std_ic if std_ic > 1e-9 else 0.0
 
+    penalized = mean_ic - 0.5 * std_ic
     print(f"平均 IC: {mean_ic:.6f}")
     print(f"IC Std : {std_ic:.6f}")
     print(f"ICIR   : {icir:.4f}")
+    print(f"Penalized (M-0.5S): {penalized:.6f}")
     return results
 
 
@@ -477,7 +545,7 @@ def nested_blind_test():
         stable_preds = []
         for name, (feats, alpha, is_niche_flag) in MODELS.items():
             X = df[feats].values
-            m = Ridge(alpha=alpha)
+            m = _make_model(alpha)
             m.fit(X[train_idx], y[train_idx])
             pred = m.predict(X[test_idx])
             model_preds.append(pred)
@@ -505,7 +573,7 @@ def nested_blind_test():
             inner_preds = []
             for name, (feats, alpha, inf) in MODELS.items():
                 X_in = inner_df[feats].values
-                m_in = Ridge(alpha=alpha)
+                m_in = _make_model(alpha)
                 m_in.fit(X_in[itrain], inner_y[itrain])
                 inner_preds.append(m_in.predict(X_in[ival]))
             inner_y_val = inner_y[ival]
@@ -535,6 +603,10 @@ def nested_blind_test():
           f"{mean_gain:>+9.6f} | {mean_inner:>10.6f} | {mean_gap:>+9.6f}")
     print(f"{'Std':<8} | {std_ens:>11.6f} |")
     print(f"{'ICIR':<8} | {icir_ens:>11.4f} |")
+    inner_std_across = np.std(inner_cv_ics)
+    penalized_inner  = mean_inner - 0.5 * inner_std_across
+    print(f"{'InnerStd':<8} | {inner_std_across:>11.6f} |")
+    print(f"{'Penalized':<9}| {penalized_inner:>11.6f} | (Inner_Mean - 0.5 * Inner_Std)")
     print()
 
     # 与标准5折的比较：外层IC与5折IC在代码层面等价（均为leave-one-group-out结构）

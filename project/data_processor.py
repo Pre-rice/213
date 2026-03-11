@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 47 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 54 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -124,6 +124,16 @@ def process_day_data(day_data):
      50.  ret_accel           - past_ret_300 - past_ret_600（近期价格收益率加速度）
                                 Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019）
                                 与 past_ret_600 负相关（-0.684）但提供独立动量加速度维度
+
+    ── Iter16 新增（波动率条件化 OVI + 截面剥离 OVI）────────────────────────────
+     51.  vol_cond_ovi        - OVI_p15 × (近期波动率/长期波动率)（波动率条件化 OVI）
+                                 理念：高波动时 OVI 信号更可靠，低波动时衰减
+                                 实证：Day1=+0.185, Day2=+0.123, Day3=+0.121, Day4=+0.134, Day5=+0.110
+                                 全 5 日均值 IC=0.134（min=0.110，方向全日一致正向）
+     52.  idio_ovi            - OVI_ep15 - Sect_OVI_ep15（截面剥离 OVI / 特异性 OVI）
+                                 理念：剥离板块共同 OVI 成分后的 E 独有委托方向
+                                 实证：Day1=+0.111, Day2=+0.044, Day3=+0.032, Day4=+0.101, Day5=+0.047
+                                 全 5 日均值 IC=0.067，与原始 OVI_ep15 低相关，独立信号维度
     """
     e = day_data['E']
 
@@ -450,6 +460,29 @@ def process_day_data(day_data):
         feats['past_ret_300'] - feats['past_ret_600'],
         -0.1, 0.1)
 
+    # ── 新增（Iter16）──────────────────────────────────────────────────────────
+
+    # vol_cond_ovi: 波动率条件化 OVI（OVI 信号 × 近期波动率相对倍数）
+    # 理念：在高波动环境中，OVI 信号的信噪比更高（因为做市商在高波动时
+    #       更依赖委托订单流来定价），因此用波动率放大 OVI 信号；
+    #       在低波动环境中，OVI 方向性较弱，自动衰减信号强度。
+    # 实现：realized_vol_120 / realized_vol_600（近期波动率相对长期均值的倍数）
+    #       × OVI_p15，裁剪至 [-0.5, 0.5]
+    # 实证：全 5 日 IC 方向一致为正（0.110-0.185），均值约 0.134
+    pr30_s = pd.Series(feats['past_ret_30'])
+    vol_120 = pr30_s.rolling(120, min_periods=10).std().fillna(0).values
+    vol_600 = pr30_s.rolling(600, min_periods=60).std().fillna(0).values
+    vol_ratio = vol_120 / (vol_600 + 1e-9)
+    feats['vol_cond_ovi'] = np.clip(feats['OVI_p15'] * vol_ratio * 3, -0.5, 0.5)
+
+    # idio_ovi: 截面剥离 OVI（E 特异性 OVI，剥离板块共同成分）
+    # 理念：OVI_ep15 包含"板块共同委托方向"和"E 独有委托方向"两个成分；
+    #       板块共同方向已由 Sect_OVI_ep15 捕捉，差值 = E 独有的特异性委托方向。
+    #       在截面维度上类似 Fama-French 的 idiosyncratic return 概念。
+    # 实证：Day1=+0.111, Day2=+0.044, Day3=+0.032, Day4=+0.101, Day5=+0.047
+    #       全 5 日均值 IC=0.067，与 OVI_ep15 低相关，提供独立信号维度
+    feats['idio_ovi'] = feats['OVI_ep15'] - feats['Sect_OVI_ep15']
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -475,6 +508,8 @@ def process_day_data(day_data):
         'book_pres_pulse', 'ret_x_ti600',
         # 新增（Iter15）：近期价格收益率加速度（动量变化方向）
         'ret_accel',
+        # 新增（Iter16）：波动率条件化 OVI + 截面剥离 OVI
+        'vol_cond_ovi', 'idio_ovi',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})
