@@ -1,16 +1,16 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 33 个 Ridge 子模型 + 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：将离线训练的 39 个 Ridge 子模型 + 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 33 个 Ridge 模型，保存系数向量。
+  1. __init__: 在全部5天训练数据上训练 39 个 Ridge 模型，保存系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
-       - 计算全部 49 个特征
-       - 对 33 个子模型做线性推理（w·x）
+       - 计算全部 52 个特征
+       - 对 39 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
-       - 集成参数与离线 train_model.py 完全一致（Iter13优化值）
+       - 集成参数与离线 train_model.py 完全一致（Iter15优化值）
 
 数据假设（参考 data_processor.py / main.py）：
   - 各股票（A/B/C/D/E）CSV 行按时间完全对齐，逐 tick 一一对应。
@@ -408,13 +408,11 @@ class MyModel:
             self._sec_ret_bufs[si].append(sr_ret)
 
         # 600-tick 前的已实现收益（冷启动期返回 0）
-        e_ret_lag  = self._e_ret_buf[0]  if len(self._e_ret_buf) > 600 else 0.0
-        e_ret_lag2 = self._e_ret_buf[0]  if len(self._e_ret_buf) > 900 else 0.0
-        # 对 e_ret_lag2，需要 900 tick 前：buffer maxlen=901，需要 len>900
-        if len(self._e_ret_buf) > 900:
-            e_ret_lag2 = list(self._e_ret_buf)[0]  # 最旧的那个
-        else:
-            e_ret_lag2 = 0.0
+        # e_ret_lag: 用负索引取 600-tick 前的值（_e_ret_buf maxlen=901，buf[0] 为最旧元素，
+        #   当 len<901 时 buf[0] != ret_{t-600}，必须用 list(buf)[-601]）
+        e_ret_lag  = list(self._e_ret_buf)[-601] if len(self._e_ret_buf) > 600 else 0.0
+        # e_ret_lag2: 取 900-tick 前的值（maxlen=901，满载时 buf[0] 恰好是最旧元素 = ret_{t-900}）
+        e_ret_lag2 = self._e_ret_buf[0]          if len(self._e_ret_buf) > 900 else 0.0
 
         sect_ret_lag = 0.0
         for si in range(4):
