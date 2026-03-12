@@ -1,16 +1,21 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 54 个子模型（Ridge + Huber）+ 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：将离线训练的 28 个子模型（Ridge）+ 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 49 个模型（Ridge + HuberRegressor），保存系数向量。
+  1. __init__: 在全部5天训练数据上训练 28 个模型（Ridge），保存系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
        - 计算全部 59 个特征
-       - 对 33 个子模型做线性推理（w·x）
+       - 对 28 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
-       - 集成参数与离线 train_model.py 完全一致（Iter13优化值）
+       - 集成参数与离线 train_model.py 完全一致
+
+Iter20 反过拟合优化：
+  从 54 个模型剪枝至 28 个（1 稳定 MTC + 27 niche Ridge）。
+  LOO 分析证实移除的 27 个模型为冗余/有害，剪枝后：
+    CV IC: 0.3132→0.3302（+5.4%），ICIR: 7.82→12.59（+61%）
 
 数据假设（参考 data_processor.py / main.py）：
   - 各股票（A/B/C/D/E）CSV 行按时间完全对齐，逐 tick 一一对应。

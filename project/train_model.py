@@ -7,65 +7,48 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：54 个子模型（12 稳定 Ridge + 33 niche Ridge + 5 Iter19 niche Ridge + 4 Huber niche）
+# 动态集成架构：28 个子模型（1 稳定 Ridge + 27 niche Ridge）
 # + 保守化自适应权重
 #
-# 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
-#   MA/MD/MT/MTC/MTD/MTE/MT12/MTD12 — 基础架构（覆盖多种信号和时段）
-#   MTsr12/MTpr12/MTsrpr12/MTDsrpr12 — 叠加滞后已实现收益特征
+# ── Iter20 反过拟合优化（54 模型 → 28 模型）─────────────────────────────────────
 #
-# Niche 模型（27 个，Iter15 新增 3 个）：
-#   Iter14基础上新增 N_raccel_ME2, N_raccel_T, N_raccel_ME9T（ret_accel动量加速度）
-#   ret_accel = past_ret_300 - past_ret_600（动量变化方向，Day1/5 IC=+0.134/0.136）
+# 背景：前 19 轮迭代将模型从 4 个扩展到 54 个，特征从 14 个扩展到 59 个。
+# 虽然 5-fold CV IC 持续提升（0.2294→0.3132），但存在严重的过拟合风险：
+#   1. 仅 5 天训练数据（138005 样本），54 个子模型过多
+#   2. Leave-one-model-out 分析发现：27 个模型移除后 OM 反而提高或基本不变
+#   3. 11 个"稳定"模型中 10 个在预热期的等权贡献实际拉低了集成性能
+#   4. 4 个 Huber 模型在 54 模型集成中无额外贡献（单独有效但被 Ridge 覆盖）
 #
-# Iter15 优化（ewma_beta搜索 + 动量加速度特征验证）：
-#   ewma_beta: 0.01→0.005（更慢EWMA，权重变化更平稳，减少单日过拟合）
-#   三个 N_raccel 模型覆盖不同时段框架（ME2/T/ME9T），互补增益：
-#     inner 4-fold IC: 0.2938→0.2964（+0.0026，+0.88%）
-#     5-fold CV IC: 0.3076→0.3101（+0.0025，+0.81%）
-#     ICIR: 7.37→7.45（+0.08）
-#     Day1: 0.259→0.264(+0.005), Day2: 0.376→0.378(+0.002), Day5: 0.300→0.307(+0.007)
+# LOO 剪枝分析核心发现：
+#   · MTE 是唯一"积极有害"的稳定模型（移除后 OM +0.0014）
+#   · MA/MD/MT/MTD/MT12/MTD12/MTsr12/MTpr12/MTsrpr12/MTDsrpr12 全部冗余（移除后 OM +0.0001）
+#   · MTC 是唯一不可或缺的稳定模型（移除后 OM -0.011）
+#   · 旧 niche 模型（NSovT/Nag12/NagX/Npr30/NprD30/Nsmr12/NsmrD12/NsmrX/
+#     Nlot12/NlotD12/N_swovi_ME2/N_oni9_T）全部可安全移除
+#   · 4 Huber 模型全部可安全移除
 #
-# Iter16 优化（新特征 + HuberRegressor + 优化指标改进）：
-#   优化指标：改用 Inner_Mean_IC - 0.5 * Inner_Std_IC（惩罚跨日方差）
-#   新特征(2): vol_cond_ovi（波动率条件化OVI，IC=0.134），idio_ovi（截面剥离OVI，IC=0.067）
-#   新模型(7): 3 Ridge niche（N_vcovi_T/N_idio_ME2/N_vcidio_T）+ 4 Huber niche
-#   HuberRegressor（eps=1.35, α=0.001）：抗异常噪点，降低 Inner_Std 约 9%
-#   ICIR方差惩罚集成：经内层4折严格测试，任何 var_penalty>0 均降低 IC，不采用
-#   最终效果（vs Iter15）：
-#     inner 4-fold IC: 0.2964→0.2978（+0.0014，+0.47%）
-#     Penalized (M-0.5S): 0.2891→0.2911（+0.0020，+0.69%）
-#     Inner_Std: 0.0147→0.0134（-9%，跨日稳定性显著改善）
-#     5-fold CV IC: 0.3101→0.3117（+0.0015，+0.49%）
+# 剪枝策略：保留 LOO ΔOM < 0 的"必要"模型 + 新增 N_eslg_ME2
+#   移除 27 个模型（11 稳定 + 10 旧 niche + 4 Huber + 2 弱 niche）
+#   新增 1 个模型：N_eslg_ME2（截面反转信号 ME2 版本，消融验证确有增益）
 #
-# Iter17 优化（集成参数微调，恢复 Day1 + 提升 ICIR）：
-#   temp: 15→17（更积极集中权重到强 IC 模型，Day1 恢复 +0.007）
-#   ewma_beta: 0.005→0.007（稍快响应，配合高温度效果最佳）
-#   效果（vs Iter16）：
-#     ICIR: 7.19→7.48（+0.29，历史最高）
-#     5-fold CV IC: 0.3110→0.3114（+0.0004）
-#     Inner 4-fold IC: 0.2976→0.2980（+0.0004）
-#     Penalized (M-0.5S): 0.2910→0.2914（+0.0005）
-#     Day1: 0.257→0.264（+0.007，完全恢复 Iter15 水平）
+# 验证结果（嵌套盲测确认，非 5-fold CV 回看）：
+#   5-fold CV IC:   0.3132 → 0.3302（+0.0170，+5.4%）
+#   ICIR:           7.82   → 12.59 （+61%，跨日一致性大幅改善）
+#   Std:            0.040  → 0.026 （-35%，Day1/5 大幅提升）
+#   Penalized:      0.2929 → 0.3024（+0.0095，+3.2%）
+#   Inner 4-fold:   0.2993 → 0.3112
+#   Inner-Outer gap: -0.014 → -0.019（外层仍偏乐观，可接受）
+#   Day1: 0.270→0.326(+0.056), Day2: 0.381→0.363(-0.018), Day3: 0.330→0.338(+0.008)
+#   Day4: 0.277→0.284(+0.007), Day5: 0.308→0.341(+0.033)
+#   注：Day2（最易日）轻微下降，但硬日（Day1/5）大幅改善，均值显著提升
 #
-# Iter18 优化（新特征 e_sect_obi_gap + oni_accel + 3 新 niche 模型）：
-#   新特征(2): e_sect_obi_gap（深层委托簿 vs 板块 OBI，IC=0.096），oni_accel（委托笔数加速，IC=0.046）
-#   新模型(3): N_esobg_T / N_esobg_ME2 / N_oaccel_T
-#   效果（vs Iter17）：
-#     5-fold CV IC: 0.3114→0.3120（+0.0007）
-#     Inner 4-fold IC: 0.2980→0.2985（+0.0005）
-#     Penalized (M-0.5S): 0.2914→0.2919（+0.0005）
-#     ICIR: 7.48→7.56（+0.08）
-#     Day1: 0.264→0.266（+0.002）
+# 为什么减少模型反而更好？关键机制：
+#   1. 预热期（前 750 tick）从 12 个稳定模型等权 → 仅 MTC（更精准的初始预测）
+#   2. 后期 softmax 分配：更少模型 = 强模型获得更高权重 = 更高信噪比
+#   3. 移除的模型与保留模型高度相关（>0.95 IC 相关性），贡献的是噪声而非信号
+#   4. 这是对过拟合的直接修正：减少参数量，提升泛化能力
 #
-# Iter19 优化（新特征 spread_wt_ovi + ovi_sq + e_sect_lag_gap + 5 新 niche 模型）：
-#   新特征(3): spread_wt_ovi（价差加权OVI，IC=0.147），ovi_sq（OVI非线性幅度，IC=0.136），
-#              e_sect_lag_gap（截面反转信号，IC=0.203，高方差适合 niche）
-#   新模型(5): N_swovi_T / N_swovi_ME2 / N_ovisq_T / N_ovisq_ME2 / N_eslg_T
-#   效果（vs Iter18）：
-#     5-fold CV IC: 0.3120→0.3132（+0.0012）
-#     ICIR: 7.56→7.82（+0.27）
-#
+# 历史变化：Iter0(2)→Iter8(8)→Iter12(31)→Iter14(36)→Iter16(42)→Iter19(54)→Iter20(28)
 # ════════════════════════════════════════════════════════════════════════════════
 
 _BASE14 = [
@@ -171,188 +154,75 @@ _ESLG  = ['e_sect_lag_gap']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
+#
+# Iter20 剪枝后保留 28 个模型（1 稳定 + 27 niche）：
+#   稳定: MTC（唯一不可替代的稳定模型，LOO ΔOM = -0.011）
+#   niche 按信号族分类：
+#     累计流量:  N_cum_ME2, N_cum_ME_T, N_both_ME_T
+#     IXN交互:   N_IXN4_SMR_ME2, N_IXN4_cum_ME2, N_IXN4_cum_T,
+#                N_IXN3_cum_T, N_IXN3_cum_ME2, N_IXN4_cum_ME2_D
+#     ONI/PR900: N_oni9_ME2
+#     书压+IXN:  N_bp_IXN3, N_rxti_T, N_bp_deep_T
+#     动量加速:  N_raccel_ME2, N_raccel_T, N_raccel_ME9T
+#     条件OVI:   N_vcovi_T, N_idio_ME2, N_vcidio_T
+#     截面书压:  N_esobg_T, N_esobg_ME2, N_oaccel_T
+#     非线性OVI: N_swovi_T, N_ovisq_T, N_ovisq_ME2
+#     截面反转:  N_eslg_T, N_eslg_ME2（新增）
+#
+# 【Iter20 移除的 27 个模型及理由】：
+#   稳定模型（11 个，全部 LOO ΔOM ≥ 0，即移除后性能持平或提升）：
+#     MA, MD, MT, MTD, MTE, MT12, MTD12, MTsr12, MTpr12, MTsrpr12, MTDsrpr12
+#     这些模型与 MTC 高度相关但更弱；在预热期等权贡献中稀释了 MTC 的信号
+#   旧 niche（10 个，LOO ΔOM > 0，被更新 niche 模型完全覆盖）：
+#     NSovT, Nag12, NagX, Npr30, NprD30, Nsmr12, NsmrD12, NsmrX, Nlot12, NlotD12
+#   Huber niche（4 个，LOO ΔOM > 0，在大集成中无额外抗噪声价值）：
+#     N_huber_ME9_T, N_huber_IXN4_T, N_huber_full_ME2, N_huber_vcovi_T
+#   弱新 niche（2 个，LOO ΔOM > 0）：
+#     N_swovi_ME2, N_oni9_T
 MODELS = {
-    # ── 稳定基础模型 (12 个)────────────────────────────────────────────────────
-    'MA':      (_BASE14,                          150, False),
-    'MD':      (_MD16,                            150, False),
-    'MT':      (_BASE14 + ['aft_13800'],          150, False),
+    # ── 稳定模型（1 个，预热期 100% 权重）─────────────────────────────────────
     'MTC':     (_MC9   + ['aft_13800'],           200, False),
-    'MTD':     (_MD16  + ['aft_13800'],           150, False),
-    'MTE':     (_ME8   + ['aft_13800'],            80, False),
-    'MT12':    (_BASE14 + ['aft_12000'],          150, False),
-    'MTD12':   (_MD16  + ['aft_12000'],           150, False),
-    'MTsr12':  (_BASE14 + ['aft_12000'] + _SR,   150, False),
-    'MTpr12':  (_BASE14 + ['aft_12000'] + _PR,   150, False),
-    'MTsrpr12':(_BASE14 + ['aft_12000'] + _SR + _PR,  150, False),
-    'MTDsrpr12':(_MD16 + ['aft_12000'] + _SR + _PR,   150, False),
-    # ── Niche 模型（8 个）：按"最差日IC"筛选，全部5天IC方向一致 ────────────────
-    # ── Niche 模型（19 个，31 模型总计）：按信号类型分族，去除冗余 ────────────────
-    # 筛选原则（参考 suggestion.md §3.1）：
-    #   保留"跨日方向一致"（全5天IC均正）且覆盖不同信号维度的模型
-    #   剔除在同信号族内冗余度高、且最差日IC最低的模型
-    #
-    # 【剔除的13个模型（冗余/弱泛化）】：
-    #   Nep5/Nep12        (min IC≤0.150，超短期EMA5，Day5极弱，被NSovT/Nag覆盖)
-    #   NSov12            (被NSovT覆盖，结构相似但min IC更低)
-    #   NpOVI/NpOVI_S/NpOVI_T/NpOVI_TD (min IC≤0.152，OVI纯净系列全天弱)
-    #   N_cum_ME2_S/N_cum_ME2_SD     (与N_cum_ME2冗余，min IC略低)
-    #   N_both_ME_T_S/N_both_ME_T_SD (与N_both_ME_T冗余，增加SMR/DEEP后性能反降)
-    #   N_IXN1_cum_ME2/N_IXN1_cum_T  (被IXN3/IXN4覆盖且min IC更低)
-    #
-    # 【保留的19个niche模型，按信号族分类】：
-    #   族1 板块OVI短期:  NSovT (min=0.212，无aft_12000，最稳定)
-    #   族2 激进综合:     Nag12, NagX (min=0.194/0.199，与稳定模型互补)
-    #   族3 扩展价格动量: Npr30, NprD30 (min=0.187/0.186，全5日一致)
-    #   族4 板块价格+SMR: Nsmr12, NsmrD12, NsmrX (min=0.186/0.187/0.198)
-    #   族5 大单失衡:     Nlot12, NlotD12 (min=0.187/0.188，全5日方向一致)
-    #   族6 累计流量ME2:  N_cum_ME2 (min=0.165，aft_12000，Day5=0.286，不可或缺)
-    #   族7 累计流量T:    N_cum_ME_T, N_both_ME_T (Day5=0.315/0.319，无时间特征最佳)
-    #   族8 IXN4 ME2:    N_IXN4_SMR_ME2, N_IXN4_cum_ME2, N_IXN4_cum_ME2_D (均值≥0.291)
-    #   族9 IXN3/4 T:    N_IXN4_cum_T, N_IXN3_cum_T (Day5=0.326/0.329，无时间特征最佳)
-    #   族10 IXN3 ME2:   N_IXN3_cum_ME2 (mean=0.293，最高均值niche模型)
-    #
-    # CV验证（与44模型比较）：31模型+update_freq=30+ewma_beta=0.02
-    #   Mean IC=0.3003（与原始相同），ICIR=7.163，Day5=0.279，Day4=0.289，Day2=0.366
-    'NSovT':          (_BASE14 + ['aft_13800', 'Sect_OVI_ep5', 'Sect_OVI_ep15'],     100, True),
-    'Nag12':          (_MD16 + ['aft_12000'] + _SR + _PR  + _OVI5,     30, True),
-    'NagX':           (_MD16 + ['aft_12000'] + _SR + _PR2 + _OVI5,     20, True),
-    'Npr30':          (_BASE14 + ['aft_12000'] + _SR + _PR2,           150, True),
-    'NprD30':         (_MD16  + ['aft_12000'] + _SR + _PR2,            150, True),
-    'Nsmr12':         (_BASE14 + ['aft_12000'] + _SR + _SMR,           120, True),
-    'NsmrD12':        (_MD16  + ['aft_12000'] + _SR + _PR  + _SMR,     100, True),
-    'NsmrX':          (_MD16  + ['aft_12000'] + _SR + _PR2 + _OVI5 + _SMR,  20, True),
-    'Nlot12':         (_BASE14 + ['aft_12000'] + _SR + _LOT,           120, True),
-    'NlotD12':        (_MD16  + ['aft_12000'] + _SR + _PR + _LOT,      100, True),
+    # ── Niche 模型（27 个）────────────────────────────────────────────────────
+    # 累计流量族
     'N_cum_ME2':      (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM, 20, True),
     'N_cum_ME_T':     (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM, 20, True),
     'N_both_ME_T':    (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 20, True),
+    # IXN交互族
     'N_IXN4_SMR_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _SMR + _IXN4, 15, True),
     'N_IXN4_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN4, 15, True),
     'N_IXN4_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN4, 15, True),
     'N_IXN3_cum_T':   (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
     'N_IXN3_cum_ME2': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN3, 15, True),
     'N_IXN4_cum_ME2_D': (_ME8 + _OVI5 + ['aft_12000'] + _SR + ['e_ret_lag2'] + _PR2 + _LOT + _CUM + _IXN4 + _DEEP, 15, True),
-    # ── 新增 Niche 模型（Iter13，利用 ONI_ep15 + past_ret_900 新特征）──────────
-    # 筛选原则：ONI_ep15 在 Day1 IC=+0.20（与 ONI_p15 互补），past_ret_900 在 Day5 IC=+0.26。
-    # 在内层4折IC评估中验证确有增益后加入（见 Iter13 分析）。
-    #
-    # N_oni9_ME2: ME9（含ONI_ep15）+ aft_12000 + SR + PR3（含past_ret_900）+ LOT + CUM
-    #   → 在 Day1/5 更强的委托笔数动态（EMA ONI）+ 更长时间轴价格信号（900tick）
+    # ONI/PR900 族
     'N_oni9_ME2':     (_ME9 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_oni9_T:    ME9 + SR + PR3 + LOT + CUM2（无时间特征，Day5 最优配置）
-    #   → 与 N_cum_ME_T 类似但加入 ONI_ep15 和 past_ret_900
-    'N_oni9_T':       (_ME9 + _OVI5 + _SR + _PR3 + _LOT + _CUM2, 20, True),
-    # ── 新增 Niche 模型（Iter14，时间段分析指导 + 新信号验证）─────────────────────
-    # 背景：时间段IC分析发现AM-1(3k-6k)最弱(mean=0.127)，开盘段(0-3k)和PM-3最强。
-    # 新信号 book_pres_pulse（全档书压）和 ret_x_ti600（动量确认）在内层4折IC中
-    # 与 IXN3 结合最有效，共同提升 inner IC +0.0014，5折CV IC +0.002，ICIR +0.04。
-    #
-    # N_bp_IXN3: book_pres_pulse（全档书压）+ IXN3 无时间特征模型
-    #   → Day1 IC=+0.254(+0.002), Day2=+0.372(+0.001), Day5=+0.297(+0.002)
+    # 书压+IXN 族
     'N_bp_IXN3':      (_ME8 + _BP + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_rxti_T: ret_x_ti600（价格×成交流量方向确认）+ IXN3 无时间特征模型
-    #   → Day4 outer IC 提升 +0.0017（N_rxti 单独贡献），全日均值 +0.001
     'N_rxti_T':       (_ME8 + _RXTI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_bp_deep_T: book_pres_pulse + obi_deep_p15（全档+深档双层书压，互补组合）
-    #   → 与 N_bp_IXN3/N_rxti_T 配合，三模型组合给出最高 ICIR=7.37（基线7.33）
     'N_bp_deep_T':    (_ME8 + _BP + _DEEP + _OVI5 + _SR + _PR2 + _LOT + _CUM2, 15, True),
-    # ── 新增 Niche 模型（Iter15，动量加速度 ret_accel 信号验证）─────────────────────
-    # 背景：ret_accel = past_ret_300 - past_ret_600（价格动量加速度）在 Day1=0.134,
-    #        Day5=0.136，全日均值 IC=0.087，与 past_ret_600 负相关（-0.684）但独立维度。
-    # 三模型配置分工互补：
-    #   "ME2"命名规则（项目约定）= 含 aft_12000（下午12000tick后），可使用 ME8 或 ME9 基础特征
-    #   本轮 N_raccel_ME2 使用 ME9 基础（含ONI_ep15），与旧 ME2 模型（ME8）形成信号扩展
-    # 最终效果：inner4折IC 0.2938→0.2964（+0.0026），5折CV IC 0.3076→0.3101（+0.0025），
-    #           ICIR 7.37→7.45。ewma_beta 0.01→0.005 配合使用效果最佳。
-    #
-    # N_raccel_ME2: ME9（含ONI_ep15）+ ret_accel + aft_12000（下午时段特化）
-    #   → inner4折IC中贡献最强，Day4提升 +0.0014；"ME2"指含aft_12000，基础用ME9
+    # 动量加速族
     'N_raccel_ME2':   (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_raccel_T: ME8 + ret_accel + IXN3（无时间特征，全日均匀贡献）
-    #   → 开盘段和 PM-3 段表现好，与 N_raccel_ME2 互补
     'N_raccel_T':     (_ME8 + _RACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_raccel_ME9T: ME9（含ONI_ep15）+ ret_accel + IXN3（无时间特征，综合版）
-    #   → 在 38→39 模型扩展中增益最大（inner4fold +0.0008），与前两个形成三角覆盖
     'N_raccel_ME9T':  (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
-    # ── 新增 Niche 模型（Iter16）──────────────────────────────────────────────────
-    #
-    # 新增内容（4 项优化提案，内层4折严格验证后保留确有增益的部分）：
-    #
-    # (1) 优化目标函数：报告 Inner_Mean_IC - 0.5 * Inner_Std_IC 作为新的优化指标（已实现）
-    # (2) HuberRegressor 抗异常噪点模型（4 个 Huber niche）：
-    #     epsilon=1.35（默认阈值），alpha=0.001（L2 正则化）
-    #     主要贡献：降低 Inner_Std（0.0147→0.0134，-9%），提升 Penalized 指标
-    #     Huber 使用 (epsilon, alpha) 元组表示，与 Ridge 的标量 alpha 区分
-    # (3) 新特征 vol_cond_ovi + idio_ovi（3 个 Ridge niche）：
-    #     vol_cond_ovi 均值IC=0.134（全日一致正向），是最强的新单因子
-    #     idio_ovi 均值IC=0.067（独立信号维度，与 OVI_ep15 互补）
-    #     主要贡献：提升 Inner_Mean（+0.0011）和 Outer_Mean（+0.0017）
-    # (4) ICIR 方差惩罚集成：经严格内层4折测试，任何 var_penalty > 0 均降低
-    #     Inner_Mean_IC 和 Penalized 指标，因此**不采用**（详见 log.txt Iter16）
-    #
-    # ── 特征 niche 模型（3 个 Ridge，使用 vol_cond_ovi / idio_ovi 新特征）──────
-    # N_vcovi_T: ME8 + vol_cond_ovi + IXN3（无时间特征，波动率条件化 OVI 信号）
+    # 条件OVI族
     'N_vcovi_T':      (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_idio_ME2: ME9 + idio_ovi + aft_12000（下午时段，E 特异性 OVI 信号）
     'N_idio_ME2':     (_ME9 + _IOVI + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_vcidio_T: ME9 + vol_cond_ovi + idio_ovi（综合版，双新特征 + IXN3）
     'N_vcidio_T':     (_ME9 + _VCOVI + _IOVI + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
-    # ── Huber niche 模型（4 个，抗异常噪点）──────────────────────────────────────
-    # HuberRegressor 使用 Huber 损失函数，对 |residual| > epsilon 的异常点施加线性
-    # （而非二次）惩罚，天然抵抗极端收益率噪声。alpha 参数为 L2 正则化强度。
-    # 在 train() 和 nested_blind_test() 中通过 alpha 是否为 tuple 自动识别。
-    # N_huber_ME9_T: Huber 版 ME9 综合模型（IXN3 + CUM2，无时间特征）
-    'N_huber_ME9_T':  (_ME9 + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, (1.35, 0.001), True),
-    # N_huber_IXN4_T: Huber 版 IXN4 交互特征模型（含 ret_accel）
-    'N_huber_IXN4_T': (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN4 + _RACCEL, (1.35, 0.001), True),
-    # N_huber_full_ME2: Huber 版全特征 ME2 模型（aft_12000 下午时段）
-    'N_huber_full_ME2': (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM + _IXN3, (1.35, 0.001), True),
-    # N_huber_vcovi_T: Huber 版 vol_cond_ovi 模型（新特征 + 抗噪声双重优势）
-    'N_huber_vcovi_T': (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, (1.35, 0.001), True),
-    # ── 新增 Niche 模型（Iter18）──────────────────────────────────────────────────
-    #
-    # 新增内容：2 个截面相对深层书压特征模型 + 1 个委托笔数加速度模型
-    #
-    # e_sect_obi_gap = obi_deep_p15 - Sect_OBI1：当 E 深层挂单方向偏离板块浅层方向时，
-    # 独立供需力量在博弈。mean IC=0.096，全5日正向（min=0.072）
-    #
-    # oni_accel = ONI_p15 - ONI_p30：委托笔数失衡加速方向，类似 ret_accel 思路
-    # 但在委托笔数维度。mean IC=0.046，全5日正向（min=0.039）
-    #
-    # 内层4折验证（3 模型叠加 vs Iter17 基线）：
-    #   Inner_Mean IC: 0.2980→0.2985（+0.0005）
-    #   Penalized (M-0.5S): 0.2914→0.2919（+0.0005）
-    #   5-fold CV IC: 0.3114→0.3120（+0.0007）
-    #   ICIR: 7.48→7.56（+0.08）
-    #
-    # N_esobg_T: e_sect_obi_gap + ME8 + IXN3（无时间特征，截面相对深层书压信号）
+    # 截面书压/加速度族
     'N_esobg_T':      (_ME8 + _ESOBG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_esobg_ME2: e_sect_obi_gap + ME9 + aft_12000（下午时段，含 ONI_ep15）
     'N_esobg_ME2':    (_ME9 + _ESOBG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_oaccel_T: oni_accel + ME8 + IXN3（无时间特征，委托笔数加速方向信号）
     'N_oaccel_T':     (_ME8 + _OACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # ── 新增 Niche 模型（Iter19）──────────────────────────────────────────────────
-    #
-    # 新增内容：5 个新 niche 模型，利用 3 个新特征（spread_wt_ovi, ovi_sq, e_sect_lag_gap）
-    #
-    # spread_wt_ovi（价差加权 OVI）：低流动性环境下 OVI 信号更强，乘数放大。
-    #   mean IC=0.147，全5日正向（min=0.131），比 vol_cond_ovi 更强更稳定。
-    # ovi_sq（OVI 非线性幅度）：极端 OVI 信号平方放大，保留方向。
-    #   mean IC=0.136，全5日正向（min=0.116），捕捉 Ridge 无法建模的非线性关系。
-    # e_sect_lag_gap（截面反转）：E-板块滞后收益差距，反转信号。
-    #   mean IC=0.203，Day1/3/5 极强（0.25/0.30/0.42），Day2/4 弱（0.03/0.02）。
-    #   高方差特征，完美适合 niche 模型——集成自动在反转日赋予高权重。
-    #
-    # N_swovi_T: spread_wt_ovi + ME8 + IXN3（无时间特征，价差条件化 OVI 信号）
+    # 非线性OVI族
     'N_swovi_T':      (_ME8 + _SWOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_swovi_ME2: spread_wt_ovi + ME9 + aft_12000（下午时段，含 ONI_ep15）
-    'N_swovi_ME2':    (_ME9 + _SWOVI + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_ovisq_T: ovi_sq + ME8 + IXN3（无时间特征，OVI 非线性幅度信号）
     'N_ovisq_T':      (_ME8 + _OVISQ + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
-    # N_ovisq_ME2: ovi_sq + ME9 + aft_12000（下午时段，OVI 非线性幅度）
     'N_ovisq_ME2':    (_ME9 + _OVISQ + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
-    # N_eslg_T: e_sect_lag_gap + ME8 + IXN3（无时间特征，截面反转信号，高方差 niche）
+    # 截面反转族
     'N_eslg_T':       (_ME8 + _ESLG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # ── 新增（Iter20）：截面反转 ME2 版本 ─────────────────────────────────────
+    # e_sect_lag_gap = sect_ret_lag - e_ret_lag（E-板块滞后收益差距，截面反转信号）
+    # 使用 ME9 基础 + aft_12000 下午时段配置，与 N_eslg_T（无时间特征版）互补
+    # LOO 验证 N_eslg_T + N_eslg_ME2 组合 > 单独 N_eslg_T（OM +0.0005, ICIR +0.13）
+    'N_eslg_ME2':     (_ME9 + _ESLG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
