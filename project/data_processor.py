@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 54 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 56 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -483,6 +483,25 @@ def process_day_data(day_data):
     #       全 5 日均值 IC=0.067，与 OVI_ep15 低相关，提供独立信号维度
     feats['idio_ovi'] = feats['OVI_ep15'] - feats['Sect_OVI_ep15']
 
+    # ── 新增（Iter18）──────────────────────────────────────────────────────────
+
+    # e_sect_obi_gap: E 深层委托簿失衡脉冲 vs 板块 1 档委托簿失衡（截面相对深层书压）
+    # 理念：obi_deep_p15 衡量 E 的 2-5 档委托簿失衡动态，Sect_OBI1 衡量板块 1 档方向。
+    #       两者差值 = E 的深层委托簿相对于板块浅层方向的偏离信号。
+    #       当 E 深层挂单方向与板块方向不一致时，E 可能有独立的供需力量在博弈。
+    # 实证：全 5 日 IC 方向一致为正（0.072-0.124），均值约 0.096
+    feats['e_sect_obi_gap'] = np.clip(
+        feats['obi_deep_p15'] - feats['Sect_OBI1'],
+        -1.0, 1.0)
+
+    # oni_accel: 委托笔数失衡加速度（ONI 短期-中期脉冲差值）
+    # 理念：ONI_p15 - ONI_p30 衡量委托笔数失衡的加速方向。
+    #       类似 ret_accel 的思路，但应用在委托笔数维度：
+    #       当近 15tick 委托笔数失衡 > 近 30tick 时，说明买方（或卖方）委托在加速，
+    #       可能预示短期价格跟随。
+    # 实证：全 5 日 IC 方向一致为正（0.039-0.051），均值约 0.046
+    feats['oni_accel'] = feats['ONI_p15'] - feats['ONI_p30']
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -510,6 +529,8 @@ def process_day_data(day_data):
         'ret_accel',
         # 新增（Iter16）：波动率条件化 OVI + 截面剥离 OVI
         'vol_cond_ovi', 'idio_ovi',
+        # 新增（Iter18）：截面相对深层书压 + 委托笔数失衡加速度
+        'e_sect_obi_gap', 'oni_accel',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

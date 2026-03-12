@@ -7,7 +7,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：46 个子模型（12 稳定 Ridge + 27 niche Ridge + 7 niche 新增[3 Ridge + 4 Huber]）
+# 动态集成架构：49 个子模型（12 稳定 Ridge + 30 niche Ridge + 3 Iter18 niche Ridge + 4 Huber niche）
 # + 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
@@ -47,6 +47,16 @@ warnings.filterwarnings('ignore')
 #     Inner 4-fold IC: 0.2976→0.2980（+0.0004）
 #     Penalized (M-0.5S): 0.2910→0.2914（+0.0005）
 #     Day1: 0.257→0.264（+0.007，完全恢复 Iter15 水平）
+#
+# Iter18 优化（新特征 e_sect_obi_gap + oni_accel + 3 新 niche 模型）：
+#   新特征(2): e_sect_obi_gap（深层委托簿 vs 板块 OBI，IC=0.096），oni_accel（委托笔数加速，IC=0.046）
+#   新模型(3): N_esobg_T / N_esobg_ME2 / N_oaccel_T
+#   效果（vs Iter17）：
+#     5-fold CV IC: 0.3114→0.3120（+0.0007）
+#     Inner 4-fold IC: 0.2980→0.2985（+0.0005）
+#     Penalized (M-0.5S): 0.2914→0.2919（+0.0005）
+#     ICIR: 7.48→7.56（+0.08）
+#     Day1: 0.264→0.266（+0.002）
 #
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -130,6 +140,14 @@ _RACCEL = ['ret_accel']
 #   全5日IC正向：Day1=0.111, Day2=0.044, Day3=0.032, Day4=0.101, Day5=0.047，均值0.067
 _VCOVI = ['vol_cond_ovi']
 _IOVI  = ['idio_ovi']
+
+# 新增（Iter18）：截面相对深层书压 + 委托笔数失衡加速度
+# e_sect_obi_gap: obi_deep_p15 - Sect_OBI1（E 深层委托簿相对板块浅层的偏离信号）
+#   全5日IC一致正向：Day1=0.116, Day2=0.124, Day3=0.072, Day4=0.074, Day5=0.094，均值0.096
+# oni_accel: ONI_p15 - ONI_p30（委托笔数失衡的短期加速方向）
+#   全5日IC一致正向：Day1=0.047, Day2=0.039, Day3=0.051, Day4=0.050, Day5=0.042，均值0.046
+_ESOBG  = ['e_sect_obi_gap']
+_OACCEL = ['oni_accel']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -271,6 +289,28 @@ MODELS = {
     'N_huber_full_ME2': (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM + _IXN3, (1.35, 0.001), True),
     # N_huber_vcovi_T: Huber 版 vol_cond_ovi 模型（新特征 + 抗噪声双重优势）
     'N_huber_vcovi_T': (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, (1.35, 0.001), True),
+    # ── 新增 Niche 模型（Iter18）──────────────────────────────────────────────────
+    #
+    # 新增内容：2 个截面相对深层书压特征模型 + 1 个委托笔数加速度模型
+    #
+    # e_sect_obi_gap = obi_deep_p15 - Sect_OBI1：当 E 深层挂单方向偏离板块浅层方向时，
+    # 独立供需力量在博弈。mean IC=0.096，全5日正向（min=0.072）
+    #
+    # oni_accel = ONI_p15 - ONI_p30：委托笔数失衡加速方向，类似 ret_accel 思路
+    # 但在委托笔数维度。mean IC=0.046，全5日正向（min=0.039）
+    #
+    # 内层4折验证（3 模型叠加 vs Iter17 基线）：
+    #   Inner_Mean IC: 0.2980→0.2985（+0.0005）
+    #   Penalized (M-0.5S): 0.2914→0.2919（+0.0005）
+    #   5-fold CV IC: 0.3114→0.3120（+0.0007）
+    #   ICIR: 7.48→7.56（+0.08）
+    #
+    # N_esobg_T: e_sect_obi_gap + ME8 + IXN3（无时间特征，截面相对深层书压信号）
+    'N_esobg_T':      (_ME8 + _ESOBG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_esobg_ME2: e_sect_obi_gap + ME9 + aft_12000（下午时段，含 ONI_ep15）
+    'N_esobg_ME2':    (_ME9 + _ESOBG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_oaccel_T: oni_accel + ME8 + IXN3（无时间特征，委托笔数加速方向信号）
+    'N_oaccel_T':     (_ME8 + _OACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())

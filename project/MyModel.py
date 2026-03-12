@@ -1,13 +1,13 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 46 个子模型（Ridge + Huber）+ 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：将离线训练的 49 个子模型（Ridge + Huber）+ 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 46 个模型（Ridge + HuberRegressor），保存系数向量。
+  1. __init__: 在全部5天训练数据上训练 49 个模型（Ridge + HuberRegressor），保存系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
-       - 计算全部 49 个特征
+       - 计算全部 56 个特征
        - 对 33 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
        - 集成参数与离线 train_model.py 完全一致（Iter13优化值）
@@ -452,7 +452,7 @@ class MyModel:
         smr30  = _price_ret(self._smid_buf,  30, _RET_CLIP_SHORT)
         smr120 = _price_ret(self._smid_buf, 120, _RET_CLIP_LONG)
 
-        # ── 组装 54 个特征 ─────────────────────────────────────────────────
+        # ── 组装 56 个特征 ─────────────────────────────────────────────────
         ovi_p15 = ovi15 - ovi600
 
         feats_arr = {
@@ -520,6 +520,9 @@ class MyModel:
             # Iter16 新增
             'vol_cond_ovi':       0.0,  # 需要滚动波动率，下面计算
             'idio_ovi':           (ovi_e15 - ovi_e600) - (s_ovi_e15 - s_ovi_e600),
+            # Iter18 新增
+            'e_sect_obi_gap':     float(np.clip((deep15 - deep600) - sect_obi1, -1.0, 1.0)),
+            'oni_accel':          (oni15 - oni600) - (oni30 - oni600),
         }
 
         # ── 计算 vol_cond_ovi（需要滚动波动率）─────────────────────────────
