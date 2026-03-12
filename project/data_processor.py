@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 52 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 54 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -124,6 +124,14 @@ def process_day_data(day_data):
      52.  ret_accel           - past_ret_300 - past_ret_600（近期价格收益率加速度）
                                 Day1 IC=+0.134, Day5=+0.136，全 5 日均值约 0.087（min=0.019）
                                 与 past_ret_600 负相关（-0.684）但提供独立动量加速度维度
+
+    ── Iter16 新增（相对信号 + 成交流加速度）──────────────────────────────────────
+     53.  e_ovi_rel_sect      - OVI_p15 - Sect_OVI_p20（E 相对板块特异性委托量超额）
+                                经济直觉：E 相对板块的特异性短期委托买入压力（alpha 信号）
+                                与 E_TI_rel_600（长期 TI 相对）互补：本信号使用短期 OVI 脉冲
+     54.  ti_accel            - TradeImb_p15 - TradeImb_p30（成交量失衡加速度）
+                                经济直觉：最近 15 tick 成交买卖相对于 15-30 tick 窗口的加速方向
+                                与 ret_accel（价格加速）互补：本信号捕捉订单流动能加速
     """
     e = day_data['E']
 
@@ -450,6 +458,25 @@ def process_day_data(day_data):
         feats['past_ret_300'] - feats['past_ret_600'],
         -0.1, 0.1)
 
+    # ── 新增（Iter16）──────────────────────────────────────────────────────────
+
+    # e_ovi_rel_sect: E 股短期 OVI 脉冲相对板块 OVI 脉冲的超额（特异性 alpha 信号）
+    # 当 E 的委托量失衡（OVI_p15）强于板块平均（Sect_OVI_p20）时，
+    # E 的特异性买入压力更强，预测 E 相对板块的超额收益
+    # 泛化设计：纯粹相对量（差值），不依赖具体数值范围，在不同市况下均有意义
+    feats['e_ovi_rel_sect'] = np.clip(
+        feats['OVI_p15'] - feats['Sect_OVI_p20'],
+        -0.5, 0.5)
+
+    # ti_accel: 成交量失衡加速度（近 15 tick 相对于近 30 tick 的短期脉冲之差）
+    # TradeImb_p15 = TI_SMA15 - TI_SMA600（最近 15 tick 的超短期脉冲）
+    # TradeImb_p30 = TI_SMA30 - TI_SMA600（近 30 tick 的短期脉冲）
+    # ti_accel > 0 表示最近 15 tick 买入力度 > 最近 15-30 tick 买入力度（加速）
+    # 与 ret_accel（价格加速）互补：本信号反映订单流的加速/减速
+    feats['ti_accel'] = np.clip(
+        feats['TradeImb_p15'] - feats['TradeImb_p30'],
+        -0.3, 0.3)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -475,6 +502,8 @@ def process_day_data(day_data):
         'book_pres_pulse', 'ret_x_ti600',
         # 新增（Iter15）：近期价格收益率加速度（动量变化方向）
         'ret_accel',
+        # 新增（Iter16）：E 相对板块特异性 OVI 超额 + 成交量失衡加速度
+        'e_ovi_rel_sect', 'ti_accel',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

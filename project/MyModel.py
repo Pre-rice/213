@@ -1,14 +1,14 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 39 个 Ridge 子模型 + 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：将离线训练的 42 个 Ridge 子模型 + 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 39 个 Ridge 模型，保存系数向量。
+  1. __init__: 在全部5天训练数据上训练 42 个 Ridge 模型，保存系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
-       - 计算全部 52 个特征
-       - 对 39 个子模型做线性推理（w·x）
+       - 计算全部 54 个特征（Iter16新增：e_ovi_rel_sect, ti_accel）
+       - 对 42 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
        - 集成参数与离线 train_model.py 完全一致（Iter15优化值）
 
@@ -506,6 +506,9 @@ class MyModel:
             'ret_x_ti600':        float(np.clip(pr600 * ti600 * 20, -0.5, 0.5)),
             # Iter15 新增
             'ret_accel':          float(np.clip(pr300 - pr600, -0.1, 0.1)),
+            # Iter16 新增
+            'e_ovi_rel_sect':     float(np.clip(ovi_p15 - (s_ovi20 - s_ovi600), -0.5, 0.5)),
+            'ti_accel':           float(np.clip((ti15 - ti600) - (ti30 - ti600), -0.3, 0.3)),
         }
 
         # NaN/Inf 清洗

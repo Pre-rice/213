@@ -100,6 +100,12 @@ _RXTI = ['ret_x_ti600']
 # ret_accel = past_ret_300 - past_ret_600，捕捉价格趋势加速/减速
 _RACCEL = ['ret_accel']
 
+# 新增（Iter16）：E 相对板块特异性委托量超额 + 成交量失衡加速度
+# e_ovi_rel_sect = OVI_p15 - Sect_OVI_p20（E特异性买入压力 vs 板块平均，alpha信号）
+# ti_accel       = TradeImb_p15 - TradeImb_p30（成交量失衡加速度）
+_EOR   = ['e_ovi_rel_sect']
+_TIACC = ['ti_accel']
+
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
 MODELS = {
@@ -205,6 +211,21 @@ MODELS = {
     # N_raccel_ME9T: ME9（含ONI_ep15）+ ret_accel + IXN3（无时间特征，综合版）
     #   → 在 38→39 模型扩展中增益最大（inner4fold +0.0008），与前两个形成三角覆盖
     'N_raccel_ME9T':  (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3, 15, True),
+    # ── 新增 Niche 模型（Iter16，相对 OVI 信号 + 成交流加速度）──────────────────────
+    # 背景：E 相对板块的特异性短期委托压力（e_ovi_rel_sect）是纯粹相对信号，
+    # 与 E_TI_rel_600（长期 TI 相对）互补，反映 E 在板块内的委托强度地位。
+    # ti_accel 捕捉订单流动能加速，与 ret_accel（价格加速）互补。
+    # 两个信号均基于已有特征的相对/差值变换，泛化性强，不依赖数据特异性。
+    #
+    # N_eor_T: ME8 + e_ovi_rel_sect（无时间特征，全日均匀贡献）
+    #   → e_ovi_rel_sect 作为核心 alpha 信号，配合 IXN3 框架
+    'N_eor_T':        (_ME8 + _EOR + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_eor_ME2: ME9 + e_ovi_rel_sect + aft_12000（午后时段特化）
+    #   → 午后时段特异性信号可能更强（信息积累），结合 ONI_ep15 和 PR3
+    'N_eor_ME2':      (_ME9 + _EOR + _OVI5 + ['aft_12000'] + _SR + _PR3 + _LOT + _CUM, 20, True),
+    # N_tia_T: ME8 + ti_accel（成交量失衡加速度，无时间特征）
+    #   → ti_accel 与 ret_accel 信号互补，覆盖订单流加速维度
+    'N_tia_T':        (_ME8 + _TIACC + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
