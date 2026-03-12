@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import Ridge, HuberRegressor
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import GroupKFold
 import warnings
 
@@ -258,12 +258,7 @@ STABLE_PRIOR        = 0.0    # 稳定模型权重下限（CV验证 stable_prior>
 
 
 def _make_model(alpha):
-    """Create Ridge or HuberRegressor based on alpha type.
-    If alpha is a tuple (epsilon, reg_alpha), create HuberRegressor.
-    If alpha is a scalar, create Ridge."""
-    if isinstance(alpha, tuple):
-        eps, reg_alpha = alpha
-        return HuberRegressor(epsilon=eps, alpha=reg_alpha, max_iter=200)
+    """Create Ridge regression model."""
     return Ridge(alpha=alpha)
 
 def ic_score(y_true, y_pred):

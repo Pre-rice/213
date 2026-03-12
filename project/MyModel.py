@@ -28,7 +28,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from collections import deque
-from sklearn.linear_model import Ridge, HuberRegressor
+from sklearn.linear_model import Ridge
 
 warnings.filterwarnings('ignore')
 
@@ -166,11 +166,7 @@ class MyModel:
 
         self._coefs: dict[str, tuple[np.ndarray, float]] = {}  # name → (coef, intercept)
         for name, (feats, alpha, _) in MODELS.items():
-            if isinstance(alpha, tuple):
-                eps, reg_alpha = alpha
-                m = HuberRegressor(epsilon=eps, alpha=reg_alpha, max_iter=200)
-            else:
-                m = Ridge(alpha=alpha)
+            m = Ridge(alpha=alpha)
             m.fit(df[feats].values, y)
             self._coefs[name] = (m.coef_.copy(), float(m.intercept_))
 
