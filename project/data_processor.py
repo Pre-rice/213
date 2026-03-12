@@ -25,7 +25,7 @@ def process_day_data(day_data):
     处理单日全部股票数据，生成 E 股票的特征表。
     由于各股票时间戳完全对齐，可直接按行对应，无需 merge。
 
-    共生成 56 个特征，覆盖多个多空动态视角，供动态集成模型使用：
+    共生成 59 个特征，覆盖多个多空动态视角，供动态集成模型使用：
 
     ── E 自身基础信号 ──────────────────────────────────────────────────────────
       1.  TotalBidVol         - E 五档总买量 (市场深度)
@@ -502,6 +502,38 @@ def process_day_data(day_data):
     # 实证：全 5 日 IC 方向一致为正（0.039-0.051），均值约 0.046
     feats['oni_accel'] = feats['ONI_p15'] - feats['ONI_p30']
 
+    # ── 新增（Iter19）──────────────────────────────────────────────────────────
+
+    # spread_wt_ovi: 价差加权 OVI（流动性条件化 OVI 信号强度）
+    # 理念：在低流动性（高价差）环境下，OVI 信号的信息含量更高——
+    #       做市商在高价差时更依赖委托订单流来定价，因此 OVI 方向性更强。
+    #       (1 + e_spread_pulse * 10) 作为乘数：高价差放大 OVI，低价差衰减。
+    # 实证：全 5 日 IC 方向一致为正（0.131-0.187），均值约 0.147
+    #       比 vol_cond_ovi（IC=0.134）更强更稳定
+    feats['spread_wt_ovi'] = np.clip(
+        (1 + feats['e_spread_pulse'] * 10) * feats['OVI_p15'],
+        -0.5, 0.5)
+
+    # ovi_sq: OVI 非线性幅度特征（|OVI|² × sign(OVI)）
+    # 理念：OVI 信号在幅度较大时可靠性更高——极端 OVI 意味着强烈的
+    #       买卖方向一致性。平方放大了极端信号的权重，保留方向。
+    #       系数 10 用于将平方后的数值缩放到合理范围。
+    # 实证：全 5 日 IC 方向一致为正（0.116-0.175），均值约 0.136
+    feats['ovi_sq'] = np.clip(
+        feats['OVI_p15']**2 * np.sign(feats['OVI_p15']) * 10,
+        -0.5, 0.5)
+
+    # e_sect_lag_gap: E-板块滞后收益差距（截面反转信号）
+    # 理念：sect_ret_lag - e_ret_lag 衡量 E 相对板块在上一周期的超额表现反转信号。
+    #       当 E 显著跑输板块（gap > 0）时，短期有均值回归倾向。
+    #       属于截面维度的反转策略核心信号。
+    # 实证：Day1=0.250, Day3=0.297, Day5=0.422（反转日极强），
+    #       Day2=0.027, Day4=0.017（趋势日弱），均值 IC=0.203
+    #       高方差特征，适合 niche 模型（让集成根据滚动 IC 动态分配权重）
+    feats['e_sect_lag_gap'] = np.clip(
+        feats['sect_ret_lag'] - feats['e_ret_lag'],
+        -0.1, 0.1)
+
     # ── 清洗并组装 DataFrame ────────────────────────────────────────────────────
     feature_cols = [
         'TotalBidVol', 'TradeImb_600', 'TradeImb_diff',
@@ -531,6 +563,8 @@ def process_day_data(day_data):
         'vol_cond_ovi', 'idio_ovi',
         # 新增（Iter18）：截面相对深层书压 + 委托笔数失衡加速度
         'e_sect_obi_gap', 'oni_accel',
+        # 新增（Iter19）：价差加权 OVI + OVI 非线性幅度 + 截面反转信号
+        'spread_wt_ovi', 'ovi_sq', 'e_sect_lag_gap',
     ]
 
     df_out = pd.DataFrame({'Time': e['Time'].values})

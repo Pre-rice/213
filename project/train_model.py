@@ -7,7 +7,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # ════════════════════════════════════════════════════════════════════════════════
-# 动态集成架构：49 个子模型（12 稳定 Ridge + 30 niche Ridge + 3 Iter18 niche Ridge + 4 Huber niche）
+# 动态集成架构：54 个子模型（12 稳定 Ridge + 33 niche Ridge + 5 Iter19 niche Ridge + 4 Huber niche）
 # + 保守化自适应权重
 #
 # 稳定模型（12 个）：在大多数日子表现稳定，预热期等权分配
@@ -57,6 +57,14 @@ warnings.filterwarnings('ignore')
 #     Penalized (M-0.5S): 0.2914→0.2919（+0.0005）
 #     ICIR: 7.48→7.56（+0.08）
 #     Day1: 0.264→0.266（+0.002）
+#
+# Iter19 优化（新特征 spread_wt_ovi + ovi_sq + e_sect_lag_gap + 5 新 niche 模型）：
+#   新特征(3): spread_wt_ovi（价差加权OVI，IC=0.147），ovi_sq（OVI非线性幅度，IC=0.136），
+#              e_sect_lag_gap（截面反转信号，IC=0.203，高方差适合 niche）
+#   新模型(5): N_swovi_T / N_swovi_ME2 / N_ovisq_T / N_ovisq_ME2 / N_eslg_T
+#   效果（vs Iter18）：
+#     5-fold CV IC: 0.3120→0.3132（+0.0012）
+#     ICIR: 7.56→7.82（+0.27）
 #
 # ════════════════════════════════════════════════════════════════════════════════
 
@@ -148,6 +156,18 @@ _IOVI  = ['idio_ovi']
 #   全5日IC一致正向：Day1=0.047, Day2=0.039, Day3=0.051, Day4=0.050, Day5=0.042，均值0.046
 _ESOBG  = ['e_sect_obi_gap']
 _OACCEL = ['oni_accel']
+
+# 新增（Iter19）：价差加权 OVI + OVI 非线性幅度 + 截面反转信号
+# spread_wt_ovi: (1 + e_spread_pulse * 10) * OVI_p15，高价差放大 OVI 信号
+#   全5日IC一致正向：Day1=0.187, Day2=0.131, Day3=0.134, Day4=0.142, Day5=0.140，均值0.147
+# ovi_sq: OVI_p15^2 * sign(OVI_p15) * 10，非线性幅度放大极端 OVI 信号
+#   全5日IC一致正向：Day1=0.175, Day2=0.128, Day3=0.122, Day4=0.140, Day5=0.116，均值0.136
+# e_sect_lag_gap: sect_ret_lag - e_ret_lag，截面反转信号（E 跑输板块 → 均值回归）
+#   IC高方差特征：Day1=0.250, Day3=0.297, Day5=0.422（强反转日极强），
+#   Day2=0.027, Day4=0.017（趋势日弱），均值0.203，适合 niche 模型
+_SWOVI = ['spread_wt_ovi']
+_OVISQ = ['ovi_sq']
+_ESLG  = ['e_sect_lag_gap']
 
 # 子模型定义：(feature_list, ridge_alpha, is_niche)
 # is_niche=True 的模型在集成预热期权重为 0，由滚动 IC 机制发现其价值
@@ -311,6 +331,28 @@ MODELS = {
     'N_esobg_ME2':    (_ME9 + _ESOBG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
     # N_oaccel_T: oni_accel + ME8 + IXN3（无时间特征，委托笔数加速方向信号）
     'N_oaccel_T':     (_ME8 + _OACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # ── 新增 Niche 模型（Iter19）──────────────────────────────────────────────────
+    #
+    # 新增内容：5 个新 niche 模型，利用 3 个新特征（spread_wt_ovi, ovi_sq, e_sect_lag_gap）
+    #
+    # spread_wt_ovi（价差加权 OVI）：低流动性环境下 OVI 信号更强，乘数放大。
+    #   mean IC=0.147，全5日正向（min=0.131），比 vol_cond_ovi 更强更稳定。
+    # ovi_sq（OVI 非线性幅度）：极端 OVI 信号平方放大，保留方向。
+    #   mean IC=0.136，全5日正向（min=0.116），捕捉 Ridge 无法建模的非线性关系。
+    # e_sect_lag_gap（截面反转）：E-板块滞后收益差距，反转信号。
+    #   mean IC=0.203，Day1/3/5 极强（0.25/0.30/0.42），Day2/4 弱（0.03/0.02）。
+    #   高方差特征，完美适合 niche 模型——集成自动在反转日赋予高权重。
+    #
+    # N_swovi_T: spread_wt_ovi + ME8 + IXN3（无时间特征，价差条件化 OVI 信号）
+    'N_swovi_T':      (_ME8 + _SWOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_swovi_ME2: spread_wt_ovi + ME9 + aft_12000（下午时段，含 ONI_ep15）
+    'N_swovi_ME2':    (_ME9 + _SWOVI + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_ovisq_T: ovi_sq + ME8 + IXN3（无时间特征，OVI 非线性幅度信号）
+    'N_ovisq_T':      (_ME8 + _OVISQ + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
+    # N_ovisq_ME2: ovi_sq + ME9 + aft_12000（下午时段，OVI 非线性幅度）
+    'N_ovisq_ME2':    (_ME9 + _OVISQ + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # N_eslg_T: e_sect_lag_gap + ME8 + IXN3（无时间特征，截面反转信号，高方差 niche）
+    'N_eslg_T':       (_ME8 + _ESLG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3, 15, True),
 }
 
 MODEL_NAMES   = list(MODELS.keys())
