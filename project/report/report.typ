@@ -20,7 +20,14 @@
   leading: 0.65em,
   spacing: 1.0em,
   justify: true,
+  first-line-indent: 2em,
 )
+
+// 列表项内部不做首行缩进
+#show list: it => {
+  set par(first-line-indent: 0em)
+  it
+}
 
 // 黑体辅助命令
 #let hei(content) = text(
@@ -32,6 +39,7 @@
 // 一级标题：四号黑体，居中
 #show heading.where(level: 1): it => {
   set align(center)
+  set par(first-line-indent: 0em)
   set text(
     font: ("WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
            "Source Han Sans SC", "SimHei"),
@@ -46,6 +54,7 @@
 // 二级标题：小四号黑体，左对齐
 #show heading.where(level: 2): it => {
   set align(left)
+  set par(first-line-indent: 0em)
   set text(
     font: ("WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
            "Source Han Sans SC", "SimHei"),
@@ -60,6 +69,7 @@
 // 三级标题：小四号黑体，左对齐
 #show heading.where(level: 3): it => {
   set align(left)
+  set par(first-line-indent: 0em)
   set text(
     font: ("WenQuanYi Zen Hei", "WenQuanYi Micro Hei", "Noto Sans CJK SC",
            "Source Han Sans SC", "SimHei"),
@@ -106,7 +116,7 @@
 本文提出Leave-One-Model-Out（LOO）反过拟合剪枝算法，将子模型数量从54精简至28，IC从0.313升至0.330，ICIR从7.82大幅跃升至12.59（+61%）；同时引入稳定-Niche双层预热架构和板块截面异质信号（e_sect_lag_gap，IC=0.203），显著提升集成稳定性。以严格五折按日交叉验证（LODO-CV）为准则，经20轮迭代优化，最终模型五折CV均值IC=0.3302，ICIR=12.59，相对初始基线（IC=0.147）提升124.6%。嵌套盲测验证确认无数据泄露，动态集成在全部五天上均优于等权基准，平均增益+0.051。本系统实现全在线O(1)增量计算，具备实盘部署可行性，可直接应用于高频Alpha信号生成、量化做市策略优化及市场状态实时监控等场景。
 
 #v(0.3em)
-#hei[关键词：]股票收益率预测；委托簿微观结构；动态集成；Ridge回归；滚动IC加权；Leave-One-Day-Out交叉验证
+#[#set par(first-line-indent: 0em); #hei[关键词：]股票收益率预测；委托簿微观结构；动态集成；Ridge回归；滚动IC加权；Leave-One-Day-Out交叉验证]
 
 #pagebreak()
 
