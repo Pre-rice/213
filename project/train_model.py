@@ -1,3 +1,5 @@
+import os
+import pickle
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -580,6 +582,38 @@ def nested_blind_test():
     return blind_ens_ics
 
 
+def save_models(output_path=None):
+    """
+    在全部 5 天训练数据上训练所有子模型，并将模型系数保存到 pickle 文件。
+
+    与 train() 的区别：
+      - train() 使用交叉验证评估模型效果（不保存模型）
+      - save_models() 在全量数据上训练（最大化样本利用率），保存供 MyModel.py 加载
+
+    保存格式：dict，键为模型名，值为 (coef: np.ndarray, intercept: float)
+    """
+    if output_path is None:
+        output_path = os.path.join(os.path.dirname(__file__), 'models.pkl')
+
+    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train.csv')
+    df = pd.read_csv(csv_path)
+    y = df['Return5min'].values
+
+    print(f"在全量数据（{len(df)} 行，5 天）上训练 {len(MODEL_NAMES)} 个子模型...")
+    coefs = {}
+    for name, (feats, alpha, _) in MODELS.items():
+        m = Ridge(alpha=alpha)
+        m.fit(df[feats].values, y)
+        coefs[name] = (m.coef_.copy(), float(m.intercept_))
+        print(f"  [{name}] 训练完成，特征数: {len(feats)}")
+
+    with open(output_path, 'wb') as f:
+        pickle.dump(coefs, f, protocol=4)
+    print(f"模型已保存至: {output_path}")
+    return coefs
+
+
 if __name__ == "__main__":
     train()
     nested_blind_test()
+    save_models()

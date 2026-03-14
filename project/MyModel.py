@@ -1,9 +1,9 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 28 个子模型（Ridge）+ 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：加载离线训练好的 28 个子模型（Ridge）+ 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 28 个模型（Ridge），保存系数向量。
+  1. __init__: 从 models.pkl 加载预训练的 28 个模型系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
@@ -24,11 +24,11 @@ Iter20 反过拟合优化：
 """
 
 import os
+import pickle
 import warnings
 import numpy as np
 import pandas as pd
 from collections import deque
-from sklearn.linear_model import Ridge
 
 warnings.filterwarnings('ignore')
 
@@ -40,8 +40,6 @@ from train_model import (
     RETURN_DELAY, NICHE_INIT_WEIGHT,
     ENSEMBLE_UPDATE_FREQ, ENSEMBLE_EWMA_BETA, STABLE_PRIOR,
 )
-from data_processor import process_day_data
-from utils import get_day_folders, load_day_data
 
 # 特征裁剪阈值（与 data_processor.py 保持一致）
 _RET_CLIP_LONG  = 0.1
@@ -153,22 +151,29 @@ class _RollingIC:
 class MyModel:
     """
     在线预测模型。
-    init 中训练全部子模型（Ridge + Huber，在 train.csv 全量数据上）。
+    __init__ 从 models.pkl 加载预训练的子模型系数（离线在全量数据上训练）。
     online_predict 接受逐 tick 数据，返回该 tick 的 Return5min 预测值。
     """
 
     # ─────────────────────────────────────────────────────────────────────────
     def __init__(self):
-        # ── 1. 训练全量模型 ────────────────────────────────────────────────────
-        csv_path = os.path.join(os.path.dirname(__file__), 'train.csv')
-        df = pd.read_csv(csv_path)
-        y  = df['Return5min'].values
-
-        self._coefs: dict[str, tuple[np.ndarray, float]] = {}  # name → (coef, intercept)
-        for name, (feats, alpha, _) in MODELS.items():
-            m = Ridge(alpha=alpha)
-            m.fit(df[feats].values, y)
-            self._coefs[name] = (m.coef_.copy(), float(m.intercept_))
+        # ── 1. 加载预训练模型系数 ─────────────────────────────────────────────
+        pkl_path = os.path.join(os.path.dirname(__file__), 'models.pkl')
+        try:
+            with open(pkl_path, 'rb') as f:
+                self._coefs: dict[str, tuple[np.ndarray, float]] = pickle.load(f)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"找不到预训练模型文件: {pkl_path}\n"
+                "请先运行 train_model.py 生成 models.pkl："
+                "  cd project && python train_model.py"
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"加载模型文件失败: {pkl_path}\n"
+                f"原始错误: {e}\n"
+                "请重新运行 train_model.py 生成 models.pkl。"
+            ) from e
 
         # ── 2. 初始化日内状态（首次调用 reset() 会真正重置）──────────────────
         self._tick_idx   = -1   # 当日已处理的 tick 计数（从 0 开始）
