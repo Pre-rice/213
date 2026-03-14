@@ -1,16 +1,21 @@
 # MyModel.py
 """
-在线预测模型：将离线训练的 33 个 Ridge 子模型 + 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：将离线训练的 28 个子模型（Ridge）+ 动态集成逻辑移植为逐 tick 推理。
 
 架构：
-  1. __init__: 在全部5天训练数据上训练 33 个 Ridge 模型，保存系数向量。
+  1. __init__: 在全部5天训练数据上训练 28 个模型（Ridge），保存系数向量。
   2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
   3. online_predict(E_row, sector_rows):
        - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
-       - 计算全部 49 个特征
-       - 对 33 个子模型做线性推理（w·x）
+       - 计算全部 59 个特征
+       - 对 28 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
-       - 集成参数与离线 train_model.py 完全一致（Iter13优化值）
+       - 集成参数与离线 train_model.py 完全一致
+
+Iter20 反过拟合优化：
+  从 54 个模型剪枝至 28 个（1 稳定 MTC + 27 niche Ridge）。
+  LOO 分析证实移除的 27 个模型为冗余/有害，剪枝后：
+    CV IC: 0.3132→0.3302（+5.4%），ICIR: 7.82→12.59（+61%）
 
 数据假设（参考 data_processor.py / main.py）：
   - 各股票（A/B/C/D/E）CSV 行按时间完全对齐，逐 tick 一一对应。
@@ -148,7 +153,7 @@ class _RollingIC:
 class MyModel:
     """
     在线预测模型。
-    init 中训练全部 39 个 Ridge 子模型（在 train.csv 全量数据上）。
+    init 中训练全部子模型（Ridge + Huber，在 train.csv 全量数据上）。
     online_predict 接受逐 tick 数据，返回该 tick 的 Return5min 预测值。
     """
 
@@ -228,6 +233,11 @@ class MyModel:
 
         # ── 全档书压（Iter14: book_pres_pulse）────────────────────────────────
         self._bp_s15    = _RunSMA(15);   self._bp_s600   = _RunSMA(600)
+
+        # ── 波动率滚动窗口（Iter16: vol_cond_ovi）────────────────────────────
+        # 需要 past_ret_30 的 rolling std over 120 and 600 ticks
+        self._pr30_buf120 = deque(maxlen=120)
+        self._pr30_buf600 = deque(maxlen=600)
 
         # ── 价格 lag 缓冲区（E 中间价）────────────────────────────────────────
         # 保存最近 901 个 tick 的中间价
@@ -443,7 +453,7 @@ class MyModel:
         smr30  = _price_ret(self._smid_buf,  30, _RET_CLIP_SHORT)
         smr120 = _price_ret(self._smid_buf, 120, _RET_CLIP_LONG)
 
-        # ── 组装 52 个特征 ─────────────────────────────────────────────────
+        # ── 组装 59 个特征 ─────────────────────────────────────────────────
         ovi_p15 = ovi15 - ovi600
 
         feats_arr = {
@@ -508,7 +518,35 @@ class MyModel:
             'ret_x_ti600':        float(np.clip(pr600 * ti600 * 20, -0.5, 0.5)),
             # Iter15 新增
             'ret_accel':          float(np.clip(pr300 - pr600, -0.1, 0.1)),
+            # Iter16 新增
+            'vol_cond_ovi':       0.0,  # 需要滚动波动率，下面计算
+            'idio_ovi':           (ovi_e15 - ovi_e600) - (s_ovi_e15 - s_ovi_e600),
+            # Iter18 新增
+            'e_sect_obi_gap':     float(np.clip((deep15 - deep600) - sect_obi1, -1.0, 1.0)),
+            'oni_accel':          (oni15 - oni600) - (oni30 - oni600),
+            # Iter19 新增
+            'spread_wt_ovi':      float(np.clip(
+                                      (1 + (e_spread - spd600) * 10) * ovi_p15,
+                                      -0.5, 0.5)),
+            'ovi_sq':             float(np.clip(
+                                      ovi_p15**2 * np.sign(ovi_p15) * 10,
+                                      -0.5, 0.5)),
+            'e_sect_lag_gap':     float(np.clip(sect_ret_lag - e_ret_lag, -0.1, 0.1)),
         }
+
+        # ── 计算 vol_cond_ovi（需要滚动波动率）─────────────────────────────
+        self._pr30_buf120.append(pr30)
+        self._pr30_buf600.append(pr30)
+        if len(self._pr30_buf120) >= 10:
+            vol_120 = float(np.std(list(self._pr30_buf120)))
+        else:
+            vol_120 = 0.0
+        if len(self._pr30_buf600) >= 60:
+            vol_600 = float(np.std(list(self._pr30_buf600)))
+        else:
+            vol_600 = 0.0
+        vol_ratio = vol_120 / (vol_600 + 1e-9)
+        feats_arr['vol_cond_ovi'] = float(np.clip(ovi_p15 * vol_ratio * 3, -0.5, 0.5))
 
         # NaN/Inf 清洗
         for k in feats_arr:
