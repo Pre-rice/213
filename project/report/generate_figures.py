@@ -395,6 +395,114 @@ def plot_ensemble_gain():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Figure 6: 系统架构图（端到端流程示意）
+# ══════════════════════════════════════════════════════════════════════════════
+def plot_system_architecture():
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.set_xlim(0, 12)
+    ax.set_ylim(0, 10)
+    ax.axis('off')
+
+    # --- 颜色方案 ---
+    C_INPUT   = '#DBEAFE'  # 蓝色 – 输入层
+    C_FEAT    = '#D1FAE5'  # 绿色 – 特征工程
+    C_MODEL   = '#FEF3C7'  # 黄色 – 子模型层
+    C_ENS     = '#EDE9FE'  # 紫色 – 集成层
+    C_OUTPUT  = '#FCE7F3'  # 粉色 – 输出层
+    C_BORDER  = '#374151'
+
+    def draw_box(ax, x, y, w, h, text, facecolor, fontsize=10, bold=False):
+        rect = plt.Rectangle((x - w/2, y - h/2), w, h,
+                              facecolor=facecolor, edgecolor=C_BORDER,
+                              linewidth=1.2, zorder=2)
+        ax.add_patch(rect)
+        weight = 'bold' if bold else 'normal'
+        ax.text(x, y, text, ha='center', va='center', fontsize=fontsize,
+                fontweight=weight, zorder=3, wrap=True,
+                multialignment='center')
+
+    def draw_arrow(ax, x1, y1, x2, y2):
+        ax.annotate('', xy=(x2, y2), xytext=(x1, y1),
+                    arrowprops=dict(arrowstyle='->', color=C_BORDER,
+                                   lw=1.5, connectionstyle='arc3,rad=0'))
+
+    # ── 第一层：输入数据 ─────────────────────────────────────────────────────
+    ax.text(6, 9.5, '系统架构：基于委托簿微观结构的多因子动态集成预测系统',
+            ha='center', va='center', fontsize=12, fontweight='bold')
+
+    stocks = ['股票A\n(Tick)', '股票B\n(Tick)', '股票C\n(Tick)',
+              '股票D\n(Tick)', '★股票E\n(预测目标)']
+    xs = [1.2, 2.9, 4.6, 6.3, 8.8]
+    for xi, label in zip(xs, stocks):
+        bold = '★' in label
+        draw_box(ax, xi, 8.6, 1.5, 0.7, label, C_INPUT, fontsize=9, bold=bold)
+
+    # ── 第二层：特征工程 ─────────────────────────────────────────────────────
+    draw_arrow(ax, 6, 8.25, 6, 7.55)
+    draw_box(ax, 6, 7.2, 11, 0.65,
+             '特征工程层（在线增量计算，O(1) 更新）\n'
+             'TI脉冲(8) | OVI脉冲(5) | 笔数失衡(4) | 板块联动(7) | '
+             '时间特征(2) | 滞后收益(12) | 簿深流量(7) | 交互信号(14)  →  共59维特征向量',
+             C_FEAT, fontsize=8.5, bold=False)
+
+    # ── 第三层：标准化 ───────────────────────────────────────────────────────
+    draw_arrow(ax, 6, 6.87, 6, 6.35)
+    draw_box(ax, 6, 6.1, 5, 0.45,
+             'z-score 标准化（使用训练集均值/标准差，随 models.pkl 存储）',
+             '#F3F4F6', fontsize=8.5)
+
+    # ── 第四层：28个子模型 ───────────────────────────────────────────────────
+    draw_arrow(ax, 6, 5.87, 6, 5.35)
+
+    model_labels = [
+        '稳定模型\nMTC\n(α=150)',
+        'OVI纯净\nniche×4\n(α=10~150)',
+        '截面反转\nniche×3\n(α=150)',
+        '非线性\nniche×4\n(α=150~1000)',
+        '深度流量\nniche×6\n(α=150)',
+        '综合多因子\nniche×10\n(α=150~500)',
+    ]
+    model_colors = ['#FEF08A', C_MODEL, C_MODEL, C_MODEL, C_MODEL, C_MODEL]
+    mxs = [1.1, 3.0, 4.7, 6.4, 8.1, 10.4]
+    for mx, ml, mc in zip(mxs, model_labels, model_colors):
+        draw_box(ax, mx, 4.6, 1.65, 1.1, ml, mc, fontsize=8, bold=(mc == '#FEF08A'))
+
+    # 子模型连线
+    for mx in mxs:
+        draw_arrow(ax, mx, 4.05, mx, 3.55)
+        ax.plot([mx, 6], [3.55, 3.1], color=C_BORDER, lw=0.8, zorder=1, ls='--')
+
+    # ── 第五层：动态集成 ─────────────────────────────────────────────────────
+    draw_box(ax, 6, 2.7, 11, 0.65,
+             '动态 IC-Softmax 集成层\n'
+             r'$\tilde{\mathrm{IC}}_i(t) = (1-\beta)\tilde{\mathrm{IC}}_i(t{-}\Delta) + \beta\,\mathrm{IC}_i(t)$   '
+             r'$\quad w_i(t) = \mathrm{softmax}(\tilde{\mathrm{IC}}_i \times \tau)_i$   '
+             r'$\quad \hat{y}(t) = \sum_i w_i(t)\hat{y}_i(t)$'
+             '\n温度τ=17 | EWMA β=0.007 | 更新频率15Tick | 滚动窗口600Tick | 标签延迟600Tick',
+             C_ENS, fontsize=8.5)
+
+    # ── 第六层：输出 ─────────────────────────────────────────────────────────
+    draw_arrow(ax, 6, 2.37, 6, 1.85)
+    draw_box(ax, 6, 1.6, 5.5, 0.55,
+             '输出：Return5min 预测值   IC=0.3302，ICIR=12.59（五折LODO-CV）',
+             C_OUTPUT, fontsize=9.5, bold=True)
+
+    # ── 辅助：离线训练标注 ───────────────────────────────────────────────────
+    ax.text(11.5, 4.6, '离线训练\n(train_model.py)',
+            ha='center', va='center', fontsize=8, color='#6B7280',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#F9FAFB', edgecolor='#D1D5DB'))
+    ax.text(11.5, 2.7, '在线推理\n(MyModel.py)',
+            ha='center', va='center', fontsize=8, color='#6B7280',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#F9FAFB', edgecolor='#D1D5DB'))
+
+    plt.tight_layout()
+    path = os.path.join(OUT_DIR, 'fig6_architecture.png')
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved: {path}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 主入口
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
@@ -404,4 +512,5 @@ if __name__ == '__main__':
     plot_feature_categories()
     plot_iteration_comparison()
     plot_ensemble_gain()
+    plot_system_architecture()
     print("All figures generated successfully.")
