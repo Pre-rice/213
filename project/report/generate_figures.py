@@ -27,6 +27,8 @@ def _setup_chinese_font():
         '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
         '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc',
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
     ]
     for path in known_paths:
@@ -39,6 +41,7 @@ def _setup_chinese_font():
     cjk_candidates = [
         'WenQuanYi Micro Hei', 'WenQuanYi Zen Hei',
         'Noto Sans CJK SC', 'Noto Serif CJK SC',
+        'Noto Sans CJK TC', 'Noto Sans CJK JP',
         'Source Han Sans CN', 'Source Han Serif CN',
         'SimHei', 'SimSun', 'Microsoft YaHei', 'PingFang SC',
     ]
@@ -49,18 +52,35 @@ def _setup_chinese_font():
             matplotlib.rcParams['axes.unicode_minus'] = False
             print(f"[fonts] Using: {font}")
             return font
-    # 扫描系统字体目录（支持 ttf/otf/ttc）
-    for path in fm.findSystemFonts(fontext='ttf') + fm.findSystemFonts(fontext='otf'):
-        if any(k in path.lower() for k in ['noto', 'cjk', 'wenquan', 'simhei', 'simsun']):
-            try:
-                fm.fontManager.addfont(path)
-                fname = fm.FontProperties(fname=path).get_name()
-                matplotlib.rcParams['font.sans-serif'] = [fname] + matplotlib.rcParams['font.sans-serif']
-                matplotlib.rcParams['axes.unicode_minus'] = False
-                print(f"[fonts] Using path: {path}, name: {fname}")
-                return fname
-            except Exception:
-                continue
+    # 扫描系统字体目录（支持 ttf/otf/ttc，包含 opentype 子目录）
+    search_dirs = [
+        '/usr/share/fonts/opentype',
+        '/usr/share/fonts/truetype',
+        '/usr/local/share/fonts',
+        os.path.expanduser('~/.fonts'),
+    ]
+    seen = set()
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        for root, _, files in os.walk(d):
+            for f in files:
+                if not f.lower().endswith(('.ttf', '.otf', '.ttc')):
+                    continue
+                path = os.path.join(root, f)
+                if path in seen:
+                    continue
+                seen.add(path)
+                if any(k in path.lower() for k in ['noto', 'cjk', 'wenquan', 'simhei', 'simsun']):
+                    try:
+                        fm.fontManager.addfont(path)
+                        fname = fm.FontProperties(fname=path).get_name()
+                        matplotlib.rcParams['font.sans-serif'] = [fname] + matplotlib.rcParams['font.sans-serif']
+                        matplotlib.rcParams['axes.unicode_minus'] = False
+                        print(f"[fonts] Using path: {path}, name: {fname}")
+                        return fname
+                    except Exception:
+                        continue
     print("[fonts] Warning: No CJK font found. Labels may not render correctly.")
     matplotlib.rcParams['axes.unicode_minus'] = False
     return None
