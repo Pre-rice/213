@@ -173,10 +173,11 @@ def plot_ic_evolution():
 
     # 标注关键里程碑
     milestones = {
-        4:  ('引入集成\n+日内时间', 'below'),
+        0:  ('简单线性模型\nbaseline', 'below'),
+        2:  ('引入多个特征\n达到单模型峰值', 'above'),
+        4:  ('模型动态集成\n+日内时间特征', 'above'),
         9:  ('累计流量\n+交互特征', 'above'),
-        10: ('突破IC=0.30', 'above'),
-        20: ('反过拟合\nLOO剪枝', 'above'),
+        20: ('反过拟合\nLOO剪枝', 'below'),
     }
     for it, (label, pos) in milestones.items():
         y  = ITER_IC[it]
@@ -203,17 +204,6 @@ def plot_ic_evolution():
     ax.set_ylim(0.10, 0.38)
     ax.grid(True, linestyle='--', alpha=0.4)
     ax.legend(fontsize=10)
-
-    # 最终结果标注
-    ax.annotate(
-        f'IC = {ITER_IC[20]:.4f}\nICIR = {ITER20_ICIR:.2f}',
-        xy=(20, ITER_IC[20]),
-        xytext=(17.5, 0.345),
-        fontsize=9,
-        color='#1D4ED8',
-        bbox=dict(boxstyle='round,pad=0.3', facecolor='#EFF6FF', edgecolor='#3B82F6'),
-        arrowprops=dict(arrowstyle='->', color='#1D4ED8', lw=1.5),
-    )
 
     plt.tight_layout()
     path = os.path.join(OUT_DIR, 'fig1_ic_evolution.png')
@@ -250,7 +240,7 @@ def plot_final_cv():
 
     ax.set_xlabel('测试天', fontsize=12)
     ax.set_ylabel('IC（皮尔森相关系数）', fontsize=12)
-    ax.set_title(f'Iter20 最终模型逐日 IC（五折 CV，ICIR = {ITER20_ICIR}）',
+    ax.set_title(f'Iter20 最终模型逐日 IC（五折交叉验证，ICIR = {ITER20_ICIR}）',
                  fontsize=13, fontweight='bold')
     ax.set_ylim(0, 0.43)
     ax.grid(axis='y', linestyle='--', alpha=0.4)
@@ -423,5 +413,4 @@ if __name__ == '__main__':
     plot_feature_categories()
     plot_iteration_comparison()
     plot_ensemble_gain()
-    plot_system_architecture()
     print("All figures generated successfully.")
