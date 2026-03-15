@@ -1,23 +1,17 @@
 # MyModel.py
 """
-在线预测模型：加载离线训练好的 28 个子模型（Ridge）+ 动态集成逻辑移植为逐 tick 推理。
+在线预测模型：加载离线训练好的 28 个子模型（Ridge）+ 动态集成逻辑，逐 tick 推理。
 
 架构：
   1. __init__: 从 models.pkl 加载预训练的 28 个模型系数向量。
-  2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag缓冲区等）。
+  2. reset():  每日开始时重置日内运行状态（滑动窗口、累计量、lag 缓冲区等）。
   3. online_predict(E_row, sector_rows):
-       - 更新日内运行统计（SMA/EMA、累计量、lag缓冲区）
+       - 更新日内运行统计（SMA/EMA、累计量、lag 缓冲区）
        - 计算全部 59 个特征
        - 对 28 个子模型做线性推理（w·x）
        - 用滚动 IC-EWMA 动态集成，得到最终预测值
-       - 集成参数与离线 train_model.py 完全一致
 
-Iter20 反过拟合优化：
-  从 54 个模型剪枝至 28 个（1 稳定 MTC + 27 niche Ridge）。
-  LOO 分析证实移除的 27 个模型为冗余/有害，剪枝后：
-    CV IC: 0.3132→0.3302（+5.4%），ICIR: 7.82→12.59（+61%）
-
-数据假设（参考 data_processor.py / main.py）：
+数据假设：
   - 各股票（A/B/C/D/E）CSV 行按时间完全对齐，逐 tick 一一对应。
   - E_row_data: pandas Series，字段见 data/1/E.csv 表头。
   - sector_row_datas: 长度为 4 的列表，每个元素为 A/B/C/D 的一行 Series。
@@ -33,17 +27,127 @@ from collections import deque
 warnings.filterwarnings('ignore')
 
 
-# ── 导入集成参数和模型定义（与 train_model.py 共享常量）──────────────────────
-from train_model import (
-    MODELS, MODEL_NAMES, MODEL_IS_NICHE,
-    ENSEMBLE_WINDOW, ENSEMBLE_TEMP, ENSEMBLE_FLOOR,
-    RETURN_DELAY, NICHE_INIT_WEIGHT,
-    ENSEMBLE_UPDATE_FREQ, ENSEMBLE_EWMA_BETA, STABLE_PRIOR,
-)
+# ── 特征裁剪阈值 ──────────────────────────────────────────────────────────────
+_RET_CLIP_LONG  = 0.1   # 长周期收益率裁剪上限
+_RET_CLIP_SHORT = 0.05  # 短周期收益率裁剪上限
 
-# 特征裁剪阈值（与 data_processor.py 保持一致）
-_RET_CLIP_LONG  = 0.1
-_RET_CLIP_SHORT = 0.05
+# ── 子模型特征列表 ────────────────────────────────────────────────────────────
+# 基础成交失衡特征组合
+_MC9 = [
+    'TradeImb_600', 'TradeImb_diff',
+    'TradeImb_p60', 'TradeImb_p40', 'TradeImb_ep60',
+    'E_TI_rel_600', 'Sect_TI_p40',
+    'TradeImb_p30', 'TradeImb_p15',
+]
+# 委托量失衡核心特征（8/9 个）
+_ME8 = [
+    'TotalBidVol', 'OVI_p15', 'OVI_p60', 'OVI_ep15',
+    'ONI_p15', 'Sect_OBI1', 'Sect_OVI_p20', 'TNI_ep15',
+]
+_ME9 = _ME8 + ['ONI_ep15']  # ME8 + EMA 委托笔数失衡
+
+# 滞后已实现收益（无前视偏差）
+_SR  = ['sect_ret_lag', 'e_ret_lag']
+_PR2 = ['past_ret_30', 'past_ret_60', 'past_ret_120', 'past_ret_300', 'past_ret_600']
+_PR3 = _PR2 + ['past_ret_900']
+_LAG2 = ['e_ret_lag2']  # 900-tick 滞后收益
+
+# 超短期 OVI EMA 脉冲（高方差，适合 niche 模型）
+_OVI5 = ['OVI_ep5', 'Sect_OVI_ep5']
+
+# 板块短期价格收益率 & 横截面相对收益
+_SMR = ['sect_mid_ret_30', 'sect_mid_ret_120', 'csm_ret_120']
+
+# 大单成交失衡
+_LOT = ['lot_imb_15', 'sect_lot_imb_15']
+
+# 深层委托簿失衡脉冲（2-5 档）
+_DEEP = ['obi_deep_p15']
+
+# 累计成交流量失衡（去趋势）
+_CUM  = ['cum_flow_imb']
+_CUM2 = ['cum_flow_imb', 'sect_cum_flow_imb']
+
+# OVI 交互特征（非线性信号增强）
+_IXN3 = ['ovi_x_abs_ret', 'tbv_x_ovi', 'srl_x_ovi', 'ret_x_cum']
+_IXN4 = _IXN3 + ['oni_x_ovi']
+
+# 全档书压脉冲 & 价格×成交流量交互
+_BP   = ['book_pres_pulse']
+_RXTI = ['ret_x_ti600']
+
+# 动量加速度
+_RACCEL = ['ret_accel']
+
+# 波动率条件化 OVI & 特异性 OVI
+_VCOVI = ['vol_cond_ovi']
+_IOVI  = ['idio_ovi']
+
+# 截面相对深层书压 & 委托笔数失衡加速度
+_ESOBG  = ['e_sect_obi_gap']
+_OACCEL = ['oni_accel']
+
+# 价差加权 OVI & OVI 非线性幅度 & 截面反转
+_SWOVI = ['spread_wt_ovi']
+_OVISQ = ['ovi_sq']
+_ESLG  = ['e_sect_lag_gap']
+
+# ── 子模型定义：(feature_list, ridge_alpha, is_niche) ─────────────────────────
+# is_niche=True 的模型在预热期权重为 0，由滚动 IC 机制动态发现价值。
+# 共 28 个子模型：1 个稳定模型（MTC）+ 27 个 niche Ridge 模型。
+MODELS = {
+    # 稳定模型（预热期 100% 权重）
+    'MTC':              (_MC9   + ['aft_13800'],                                               200, False),
+    # 累计流量族
+    'N_cum_ME2':        (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM,    20,  True),
+    'N_cum_ME_T':       (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM,                            20,  True),
+    'N_both_ME_T':      (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2,                           20,  True),
+    # IXN 交互族
+    'N_IXN4_SMR_ME2':   (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _SMR + _IXN4,  15, True),
+    'N_IXN4_cum_ME2':   (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _IXN4,         15, True),
+    'N_IXN4_cum_T':     (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN4,                               15, True),
+    'N_IXN3_cum_T':     (_ME8 + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,                               15, True),
+    'N_IXN3_cum_ME2':   (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _IXN3,        15, True),
+    'N_IXN4_cum_ME2_D': (_ME8 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR2 + _LOT + _CUM + _IXN4 + _DEEP, 15, True),
+    # ONI/PR900 族
+    'N_oni9_ME2':       (_ME9 + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM,    20,  True),
+    # 书压 + IXN 族
+    'N_bp_IXN3':        (_ME8 + _BP + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,             15,  True),
+    'N_rxti_T':         (_ME8 + _RXTI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,           15,  True),
+    'N_bp_deep_T':      (_ME8 + _BP + _DEEP + _OVI5 + _SR + _PR2 + _LOT + _CUM2,             15,  True),
+    # 动量加速族
+    'N_raccel_ME2':     (_ME9 + _RACCEL + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    'N_raccel_T':       (_ME8 + _RACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,         15,  True),
+    'N_raccel_ME9T':    (_ME9 + _RACCEL + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3,         15,  True),
+    # 条件 OVI 族
+    'N_vcovi_T':        (_ME8 + _VCOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,          15,  True),
+    'N_idio_ME2':       (_ME9 + _IOVI + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    'N_vcidio_T':       (_ME9 + _VCOVI + _IOVI + _OVI5 + _SR + _PR3 + _LOT + _CUM2 + _IXN3,  15,  True),
+    # 截面书压/加速度族
+    'N_esobg_T':        (_ME8 + _ESOBG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,          15,  True),
+    'N_esobg_ME2':      (_ME9 + _ESOBG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    'N_oaccel_T':       (_ME8 + _OACCEL + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,         15,  True),
+    # 非线性 OVI 族
+    'N_swovi_T':        (_ME8 + _SWOVI + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,          15,  True),
+    'N_ovisq_T':        (_ME8 + _OVISQ + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,          15,  True),
+    'N_ovisq_ME2':      (_ME9 + _OVISQ + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+    # 截面反转族
+    'N_eslg_T':         (_ME8 + _ESLG + _OVI5 + _SR + _PR2 + _LOT + _CUM2 + _IXN3,           15,  True),
+    'N_eslg_ME2':       (_ME9 + _ESLG + _OVI5 + ['aft_12000'] + _SR + _LAG2 + _PR3 + _LOT + _CUM, 20, True),
+}
+
+MODEL_NAMES    = list(MODELS.keys())
+MODEL_IS_NICHE = [v[2] for v in MODELS.values()]
+
+# ── 动态集成超参数 ────────────────────────────────────────────────────────────
+ENSEMBLE_WINDOW      = 600    # 滚动 IC 窗口（tick 数）
+ENSEMBLE_TEMP        = 17     # softmax 温度（控制权重集中程度）
+ENSEMBLE_FLOOR       = 0.0    # 权重下限
+RETURN_DELAY         = 600    # Return5min 可知延迟（5 分钟 / 0.5s = 600 ticks）
+NICHE_INIT_WEIGHT    = 0.0    # niche 模型预热期权重（0 = 等待滚动 IC 发现价值）
+ENSEMBLE_UPDATE_FREQ = 15     # 权重更新频率（tick 数）
+ENSEMBLE_EWMA_BETA   = 0.007  # IC 的 EWMA 平滑系数（α = 0.007）
+STABLE_PRIOR         = 0.0    # 稳定模型权重下限
 
 
 def _imb(a, b):
@@ -236,11 +340,10 @@ class MyModel:
         self._scum_buy  = 0.0;  self._scum_sell = 0.0
         self._scum_s600 = _RunSMA(600)
 
-        # ── 全档书压（Iter14: book_pres_pulse）────────────────────────────────
+        # ── 全档书压（book_pres_pulse = 全5档委托失衡 SMA15-SMA600 脉冲）────────
         self._bp_s15    = _RunSMA(15);   self._bp_s600   = _RunSMA(600)
 
-        # ── 波动率滚动窗口（Iter16: vol_cond_ovi）────────────────────────────
-        # 需要 past_ret_30 的 rolling std over 120 and 600 ticks
+        # ── 波动率滚动窗口（vol_cond_ovi 所需，past_ret_30 的短/长期滚动标准差）
         self._pr30_buf120 = deque(maxlen=120)
         self._pr30_buf600 = deque(maxlen=600)
 
@@ -249,30 +352,22 @@ class MyModel:
         self._mid_buf  = deque(maxlen=901)
         self._smid_buf = deque(maxlen=121)  # 板块均值中间价，最长 lag=120
 
-        # ── Return5min lag 缓冲区（用于 sect_ret_lag / e_ret_lag / e_ret_lag2）
-        # Return5min(t) 在 t+600 tick 后可知，因此：
-        #   e_ret_lag   = Return5min(t-600)
-        #   sect_ret_lag= 各板块 Return5min(t-600) 均值
-        #   e_ret_lag2  = Return5min(t-900)
-        # 在日初 (<600 tick) 无历史，返回 0（中性，与在线预测一致）
+        # ── Return5min lag 缓冲区 ─────────────────────────────────────────────
+        # Return5min(t) 在 t+600 tick 后可知：
+        #   e_ret_lag    = Return5min(t-600)，sect_ret_lag = 各板块均值
+        #   e_ret_lag2   = Return5min(t-900)
+        # 日初不足延迟长度时返回 0（中性）
         self._e_ret_buf    = deque(maxlen=901)  # E 的 Return5min lag 缓冲
         self._sec_ret_bufs = [deque(maxlen=601) for _ in range(4)]  # A/B/C/D
 
         # ── 动态集成状态 ─────────────────────────────────────────────────────
         n_models = len(MODEL_NAMES)
-        # rolling IC：每个模型一个滚动 IC 计算器
         self._roll_ic      = [_RollingIC(ENSEMBLE_WINDOW) for _ in range(n_models)]
-        # EWMA 平滑后的 IC（每模型一个标量）
         self._ewma_ic      = np.zeros(n_models, dtype=float)
-        # 当前权重（初始化为预热期权重）
         self._weights      = self._warmup_weights()
-        # 各模型预测缓冲区（用于 rolling IC 的预测侧）
         self._pred_bufs    = [deque(maxlen=ENSEMBLE_WINDOW) for _ in range(n_models)]
-        # Return5min 缓冲区（用于 rolling IC 的真值侧，延迟 RETURN_DELAY ticks）
         self._ret_for_ic   = deque(maxlen=ENSEMBLE_WINDOW)
-        # 预测缓冲区（等待 RETURN_DELAY ticks 后配对进入 rolling IC）
         self._preds_delay  = [deque(maxlen=RETURN_DELAY + 1) for _ in range(n_models)]
-        # 上次权重更新的 tick 计数
         self._last_upd     = -1
 
     def _warmup_weights(self) -> np.ndarray:
@@ -315,7 +410,7 @@ class MyModel:
         ask_deep = sum(float(e[f'AskVolume{i}']) for i in range(2, 6))
         obi_deep_val = _imb(bid_deep, ask_deep)
 
-        # 全档书压（Iter14: book_pres_pulse = SMA15 - SMA600 of all-5-level book imbalance）
+        # 全档书压：全 5 档买卖委托失衡（与深层委托簿 2-5 档信号互补）
         ask_all = sum(float(e[f'AskVolume{i}']) for i in range(1, 6))
         book_pres_val = _imb(tbv, ask_all)
 
@@ -399,7 +494,7 @@ class MyModel:
         deep15   = self._deep_s15.update(obi_deep_val)
         deep600  = self._deep_s600.update(obi_deep_val)
 
-        # 全档书压 SMA (Iter14)
+        # 全档书压 SMA
         bp15  = self._bp_s15.update(book_pres_val)
         bp600 = self._bp_s600.update(book_pres_val)
 
@@ -424,10 +519,9 @@ class MyModel:
 
         # 600-tick 前的已实现收益（冷启动期返回 0）
         e_ret_lag  = self._e_ret_buf[0]  if len(self._e_ret_buf) > 600 else 0.0
-        e_ret_lag2 = self._e_ret_buf[0]  if len(self._e_ret_buf) > 900 else 0.0
-        # 对 e_ret_lag2，需要 900 tick 前：buffer maxlen=901，需要 len>900
+        # e_ret_lag2：需要 900-tick 前的收益（buffer maxlen=901，取最旧元素）
         if len(self._e_ret_buf) > 900:
-            e_ret_lag2 = list(self._e_ret_buf)[0]  # 最旧的那个
+            e_ret_lag2 = list(self._e_ret_buf)[0]
         else:
             e_ret_lag2 = 0.0
 
@@ -441,9 +535,10 @@ class MyModel:
         self._smid_buf.append(sect_mid)
 
         def _price_ret(buf, lag, clip):
+            """计算 lag 个 tick 前的中间价收益率，裁剪至 [-clip, clip]。"""
             if len(buf) <= lag:
                 return 0.0
-            old = list(buf)[-(lag + 1)]  # lag 个 tick 之前的值（下标从0数）
+            old = list(buf)[-(lag + 1)]
             if old < 1e-9:
                 return 0.0
             return float(np.clip((buf[-1] - old) / old, -clip, clip))
@@ -509,7 +604,7 @@ class MyModel:
             'cum_flow_imb':       float(np.clip(cum_raw  - cum_base,  -0.5, 0.5)),
             'sect_cum_flow_imb':  float(np.clip(scum_raw - scum_base, -0.5, 0.5)),
             'e_ret_lag2':         float(np.clip(e_ret_lag2, -_RET_CLIP_LONG, _RET_CLIP_LONG)),
-            # 交互特征
+            # OVI 非线性交互特征
             'ovi_x_abs_ret':      float(np.clip(ovi_p15 * abs(pr600) * 20, -0.5, 0.5)),
             'tbv_x_ovi':          float(np.clip(tbv / (tbv600 + 1e-9) * ovi_p15 * 5, -0.5, 0.5)),
             'srl_x_ovi':          float(np.clip(
@@ -518,18 +613,17 @@ class MyModel:
             'ret_x_cum':          float(np.clip(pr600 * float(np.clip(cum_raw - cum_base, -0.5, 0.5))
                                                 * 20, -0.5, 0.5)),
             'oni_x_ovi':          float(np.clip((oni15 - oni600) * ovi_p15 * 5, -0.5, 0.5)),
-            # Iter14 新增
+            # 书压 & 动量特征
             'book_pres_pulse':    float(np.clip(bp15 - bp600, -0.5, 0.5)),
             'ret_x_ti600':        float(np.clip(pr600 * ti600 * 20, -0.5, 0.5)),
-            # Iter15 新增
             'ret_accel':          float(np.clip(pr300 - pr600, -0.1, 0.1)),
-            # Iter16 新增
-            'vol_cond_ovi':       0.0,  # 需要滚动波动率，下面计算
+            # 条件化 OVI 特征（vol_cond_ovi 占位，后续填入）
+            'vol_cond_ovi':       0.0,
             'idio_ovi':           (ovi_e15 - ovi_e600) - (s_ovi_e15 - s_ovi_e600),
-            # Iter18 新增
+            # 截面书压 & 委托加速度
             'e_sect_obi_gap':     float(np.clip((deep15 - deep600) - sect_obi1, -1.0, 1.0)),
             'oni_accel':          (oni15 - oni600) - (oni30 - oni600),
-            # Iter19 新增
+            # 非线性 OVI & 截面反转
             'spread_wt_ovi':      float(np.clip(
                                       (1 + (e_spread - spd600) * 10) * ovi_p15,
                                       -0.5, 0.5)),
@@ -539,7 +633,7 @@ class MyModel:
             'e_sect_lag_gap':     float(np.clip(sect_ret_lag - e_ret_lag, -0.1, 0.1)),
         }
 
-        # ── 计算 vol_cond_ovi（需要滚动波动率）─────────────────────────────
+        # ── 计算 vol_cond_ovi（短期/长期波动率比值条件化 OVI_p15）──────────────
         self._pr30_buf120.append(pr30)
         self._pr30_buf600.append(pr30)
         if len(self._pr30_buf120) >= 10:
@@ -583,7 +677,7 @@ class MyModel:
             for mi in range(n_models):
                 delayed_pred = list(self._preds_delay[mi])[-(RETURN_DELAY + 1)]
                 ic_val = self._roll_ic[mi].update(delayed_pred, delayed_ret)
-                # EWMA 平滑
+                # EWMA 平滑 IC 估计：α*IC(t) + (1-α)*EWMA(t-1)
                 self._ewma_ic[mi] = (ENSEMBLE_EWMA_BETA * ic_val
                                      + (1.0 - ENSEMBLE_EWMA_BETA) * self._ewma_ic[mi])
 
@@ -592,7 +686,7 @@ class MyModel:
         if t < warmup:
             weights = self._warmup_weights()
         elif t - self._last_upd >= ENSEMBLE_UPDATE_FREQ:
-            # softmax on EWMA-smoothed IC
+            # softmax 权重：以 EWMA-IC × 温度 为 logit
             ic_scaled = np.clip(self._ewma_ic * ENSEMBLE_TEMP, -10.0, 10.0)
             exp_ic    = np.exp(ic_scaled)
             weights   = exp_ic / (exp_ic.sum() + 1e-12)
