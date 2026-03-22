@@ -22,51 +22,50 @@ METRO_LINES = {
         "娄山关路", "中山公园", "江苏路", "静安寺", "南京西路", "人民广场",
         "南京东路", "陆家嘴", "东昌路", "世纪大道", "上海科技馆", "世纪公园",
         "龙阳路", "张江高科", "金科路", "唐镇", "创新中路", "华夏东路", "川沙",
-        "东川路", "迪士尼", "浦东国际机场", "广兰路"],
+        "迪士尼", "浦东国际机场", "广兰路"],
 
     3: ["江杨北路", "宝杨路", "水产路", "淞滨路", "张华浜", "淞发路",
         "长途客运总站", "上海火车站", "中山北路", "镇坪路", "曹杨路",
         "中山公园", "金沙江路", "延安西路", "虹桥路", "宜山路", "漕溪路",
         "上海体育馆", "上海体育场", "龙华", "龙漕路", "石龙路", "上海南站"],
-
-    4: ["宜山路", "虹桥路", "延安西路", "中山公园", "金沙江路", "曹杨路",
-        "镇坪路", "中山北路", "上海火车站", "宝山路", "海伦路", "临平路",
-        "大连路", "杨树浦路", "浦东大道", "世纪大道", "蓝村路", "塘桥",
-        "南浦大桥", "西藏南路", "鲁班路", "大木桥路", "东安路", "上海体育馆",
-        "上海体育场", "上海南站"],
 }
 
+# 一次性构建网络图，供所有函数复用
+_GRAPH = None
+_STATION_LINES = None
 
-def build_metro_graph():
-    """构建地铁网络图"""
+
+def _get_metro_graph():
+    """懒加载：构建并缓存地铁网络图"""
+    global _GRAPH, _STATION_LINES
+    if _GRAPH is not None:
+        return _GRAPH, _STATION_LINES
+
     graph = defaultdict(dict)  # graph[station] = {neighbor: (line, cost)}
     station_lines = defaultdict(set)  # station_lines[station] = {line numbers}
 
-    # 添加同线路相邻站点的连接
     for line_num, stations in METRO_LINES.items():
-        for i, station in enumerate(stations):
+        for station in stations:
             station_lines[station].add(line_num)
         for i in range(len(stations) - 1):
             s1, s2 = stations[i], stations[i + 1]
             graph[s1][s2] = (line_num, 1)
             graph[s2][s1] = (line_num, 1)
 
+    _GRAPH = graph
+    _STATION_LINES = station_lines
     return graph, station_lines
 
 
 def find_transfer_stations(line1, line2):
     """找到两条线路的换乘站"""
-    _, station_lines = build_metro_graph()
-    transfers = []
-    for station, lines in station_lines.items():
-        if line1 in lines and line2 in lines:
-            transfers.append(station)
-    return transfers
+    _, station_lines = _get_metro_graph()
+    return [s for s, lines in station_lines.items() if line1 in lines and line2 in lines]
 
 
 def bfs_shortest_path(start, end):
     """BFS求最短路径"""
-    graph, _ = build_metro_graph()
+    graph, _ = _get_metro_graph()
     if start not in graph or end not in graph:
         return None, []
 
@@ -114,12 +113,8 @@ def analyze_213():
 
 def find_transfer_stations_multi(lines):
     """找到多条线路的公共换乘站"""
-    _, station_lines = build_metro_graph()
-    transfers = []
-    for station, slines in station_lines.items():
-        if all(line in slines for line in lines):
-            transfers.append(station)
-    return transfers
+    _, station_lines = _get_metro_graph()
+    return [s for s, slines in station_lines.items() if all(line in slines for line in lines)]
 
 
 if __name__ == "__main__":
